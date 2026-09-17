@@ -119,6 +119,14 @@ same environment variable. Never commit the key or put it in a source file.
 - A failed or unexpected Jev response fails the compaction call rather than
   silently deleting content.
 
+## Claude Code mod
+
+The repository includes an early-access Claude Code function-hook plugin under
+[`plugin/`](plugin/). It can return Jev-selected original messages from
+`session.compact` and falls back to Claude Code's built-in summary on errors or
+insufficient reduction. See [`plugin/README.md`](plugin/README.md) for
+installation, configuration, and the Claude Code 2.1.274 type reference.
+
 ## Prior art
 
 The protected and classified keep categories mirror the information that

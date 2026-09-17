@@ -20,7 +20,8 @@
   ],
   "scripts": {
     "build": "tsc",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && npm run typecheck:plugin",
+    "typecheck:plugin": "tsc -p plugin --noEmit",
     "test": "vitest run",
     "demo": "tsx examples/demo.ts"
   },
