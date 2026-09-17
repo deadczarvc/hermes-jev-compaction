@@ -1,0 +1,62 @@
+{
+  "name": "fast-jev-compaction",
+  "version": "0.1.0",
+  "description": "Verbatim Jev-guided compaction for Claude Code sessions.",
+  "license": "MIT",
+  "userConfig": {
+    "apiKey": {
+      "type": "string",
+      "title": "TypeSafe API key",
+      "description": "TypeSafe API key. Leave unset to use TYPESAFE_API_KEY.",
+      "sensitive": true
+    },
+    "dropThreshold": {
+      "type": "number",
+      "title": "Drop threshold",
+      "description": "Minimum Jev removal probability.",
+      "default": 0.8
+    },
+    "minKindConfidence": {
+      "type": "number",
+      "title": "Minimum kind confidence",
+      "description": "Minimum confidence for protected kinds and drops.",
+      "default": 0.5
+    },
+    "preserveRecentMessages": {
+      "type": "number",
+      "title": "Recent messages to preserve",
+      "description": "Number of newest messages pinned from compaction.",
+      "default": 6
+    },
+    "compactAtPercent": {
+      "type": "number",
+      "title": "Compaction percentage",
+      "description": "Context percentage at which turn.complete requests compaction.",
+      "default": 60
+    },
+    "minReductionRatio": {
+      "type": "number",
+      "title": "Minimum reduction ratio",
+      "description": "Minimum estimated character reduction required to replace history.",
+      "default": 0.25
+    },
+    "maxWindowChars": {
+      "type": "number",
+      "title": "Maximum Jev window characters",
+      "description": "Maximum preview characters sent in one Jev request.",
+      "default": 60000
+    },
+    "previewChars": {
+      "type": "number",
+      "title": "Unit preview characters",
+      "description": "Maximum text and tool-input preview length per unit.",
+      "default": 800
+    },
+    "model": {
+      "type": "string",
+      "title": "Jev model",
+      "description": "TypeSafe Jev model name.",
+      "default": "jev-latest"
+    }
+  }
+}
