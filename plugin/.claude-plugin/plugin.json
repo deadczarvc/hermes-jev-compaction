@@ -16,6 +16,12 @@
       "description": "Minimum Jev removal probability.",
       "default": 0.8
     },
+    "toolOutputDropThreshold": {
+      "type": "number",
+      "title": "Tool output drop threshold",
+      "description": "Minimum Jev removal probability for units that contain tool results (file reads, command output).",
+      "default": 0.5
+    },
     "minKindConfidence": {
       "type": "number",
       "title": "Minimum kind confidence",

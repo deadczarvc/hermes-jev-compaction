@@ -23,16 +23,18 @@ const KIND_CRITERIA: Record<Kind, string> = {
     'An instruction, constraint, preference, or request from the user',
   decision: 'A design/implementation decision or key finding',
   file_reference:
-    'Names a file path, symbol, command, URL or identifier that will be needed',
+    'A short mention of a file path, symbol, command, URL or identifier that will be needed (not the file contents themselves)',
   error: 'An error message or its fix',
   pending_task: 'Work that still needs to be done',
-  stale_tool_output: 'Tool/file/log output that has already been acted on',
+  stale_tool_output:
+    'The result of a tool call (file contents, directory listing, command or test output, search results) that the assistant already used; it can be re-read or re-run later',
   chatter: 'Greetings, acknowledgements, filler',
   other: 'Other content that does not fit the categories above',
 };
 
 const DEFAULTS = {
   dropThreshold: 0.8,
+  toolOutputDropThreshold: 0.5,
   minKindConfidence: 0.5,
   protectedKinds: ['user_instruction', 'pending_task'] as Kind[],
   preserveRecentMessages: 6,
@@ -66,6 +68,7 @@ export type CompactionUnit = {
   id: string;
   messages: SessionMessage[];
   pinned: boolean;
+  toolOutput: boolean;
   preview: string;
 };
 
@@ -86,6 +89,7 @@ export type UnitDecision = {
 export type ModConfig = {
   apiKey?: string;
   dropThreshold?: number;
+  toolOutputDropThreshold?: number;
   minKindConfidence?: number;
   protectedKinds?: Kind[];
   preserveRecentMessages?: number;
@@ -100,6 +104,7 @@ export type ModConfig = {
 type ResolvedConfig = {
   apiKey?: string;
   dropThreshold: number;
+  toolOutputDropThreshold: number;
   minKindConfidence: number;
   protectedKinds: Set<Kind>;
   preserveRecentMessages: number;
@@ -157,6 +162,11 @@ function resolveConfig(options: PluginOptions | ModConfig): ResolvedConfig {
       options,
       'dropThreshold',
       DEFAULTS.dropThreshold,
+    ),
+    toolOutputDropThreshold: optionNumber(
+      options,
+      'toolOutputDropThreshold',
+      DEFAULTS.toolOutputDropThreshold,
     ),
     minKindConfidence: optionNumber(
       options,
@@ -235,6 +245,9 @@ function unitPreview(messages: readonly SessionMessage[], limit: number): string
     .flatMap((message) => message.toolUses)
     .map((tool) => toolPreview(tool, limit))
     .join('; ');
+  const results = messages.flatMap((message) => message.toolResults ?? []);
+  const resultChars = results.reduce((sum, result) => sum + result.text.length, 0);
+  const resultText = truncate(results.map((result) => result.text).join('\n'), limit);
   const text = truncate(
     messages
       .map((message) => message.text)
@@ -242,7 +255,14 @@ function unitPreview(messages: readonly SessionMessage[], limit: number): string
       .join('\n'),
     limit,
   );
-  return `role=${roles}; tools=${tools || '(none)'}; text=${text}`;
+  const chars = messages.reduce((sum, message) => sum + messageChars(message), 0);
+  return `role=${roles}; chars=${chars}; tools=${tools || '(none)'}; text=${text}${
+    results.length > 0 ? `; tool_result(${resultChars} chars)=${resultText}` : ''
+  }`;
+}
+
+function hasToolOutput(messages: readonly SessionMessage[]): boolean {
+  return messages.some((message) => (message.toolResults ?? []).length > 0);
 }
 
 export function groupMessages(
@@ -276,6 +296,7 @@ export function groupMessages(
       id: `unit-${index}`,
       messages: grouped,
       pinned: index === 0 || end >= recentStart,
+      toolOutput: hasToolOutput(grouped),
       preview: unitPreview(grouped, previewChars),
     });
     index = end;
@@ -305,9 +326,12 @@ export function packWindows(
 }
 
 export function decideUnit(
-  unit: Pick<CompactionUnit, 'id' | 'pinned'>,
+  unit: Pick<CompactionUnit, 'id' | 'pinned'> & Partial<Pick<CompactionUnit, 'toolOutput'>>,
   answer: { drop: number; kind: Kind; kindConfidence: number },
-  config: Pick<ResolvedConfig, 'dropThreshold' | 'minKindConfidence' | 'protectedKinds'>,
+  config: Pick<
+    ResolvedConfig,
+    'dropThreshold' | 'toolOutputDropThreshold' | 'minKindConfidence' | 'protectedKinds'
+  >,
 ): UnitDecision {
   if (unit.pinned) {
     return {
@@ -332,7 +356,10 @@ export function decideUnit(
     answer.kindConfidence >= config.minKindConfidence
   ) {
     decision.reason = 'protected_kind';
-  } else if (answer.drop < config.dropThreshold) {
+  } else if (
+    answer.drop <
+    (unit.toolOutput ? config.toolOutputDropThreshold : config.dropThreshold)
+  ) {
     decision.reason = 'below_threshold';
   } else if (answer.kindConfidence < config.minKindConfidence) {
     decision.reason = 'low_confidence';
@@ -380,7 +407,7 @@ function questionsFor(units: readonly CompactionUnit[]): Record<string, unknown>
         `drop_${unit.id}`,
         {
           type: 'noul',
-          instructions: `Unit ${unit.id} can be removed from the conversation without losing information the assistant needs to continue the current task`,
+          instructions: `Unit ${unit.id} can be removed from the conversation without losing information the assistant needs to continue the current task. Tool results the assistant already acted on (file contents, listings, test output) can be re-read or re-run and are safe to remove; the user's instructions, constraints, decisions, errors and pending tasks must stay.`,
         },
       ],
       [
@@ -458,6 +485,7 @@ async function askWindow(
         unit.id,
         decideUnit(unit, answer, {
           dropThreshold: config.dropThreshold,
+          toolOutputDropThreshold: config.toolOutputDropThreshold,
           minKindConfidence: config.minKindConfidence,
           protectedKinds: config.protectedKinds,
         }),
@@ -537,6 +565,11 @@ function optionConfig(options: PluginOptions): ModConfig {
   return {
     apiKey: typeof options.apiKey === 'string' && options.apiKey.length > 0 ? options.apiKey : undefined,
     dropThreshold: optionNumber(options, 'dropThreshold', DEFAULTS.dropThreshold),
+    toolOutputDropThreshold: optionNumber(
+      options,
+      'toolOutputDropThreshold',
+      DEFAULTS.toolOutputDropThreshold,
+    ),
     minKindConfidence: optionNumber(
       options,
       'minKindConfidence',
@@ -568,10 +601,30 @@ function optionConfig(options: PluginOptions): ModConfig {
 }
 
 async function getApiKey(
-  $: { env: { get: (name: string) => Promise<string | undefined> } },
+  $: {
+    env: { get: (name: string) => Promise<string | undefined> };
+    settings: { read: () => Promise<Readonly<Record<string, unknown>>> };
+  },
   config: ModConfig,
 ): Promise<string | undefined> {
-  return config.apiKey || (await $.env.get('TYPESAFE_API_KEY'));
+  if (config.apiKey) return config.apiKey;
+  const fromEnv = await $.env.get('TYPESAFE_API_KEY');
+  if (fromEnv) return fromEnv;
+  const settings = await $.settings.read();
+  const env = settings['env'];
+  if (env && typeof env === 'object') {
+    const value = (env as Record<string, unknown>)['TYPESAFE_API_KEY'];
+    if (typeof value === 'string' && value) return value;
+  }
+  return undefined;
+}
+
+function notify(
+  $: { ui: { log: (text: string) => void; toast: (text: string, options?: { timeoutMs?: number }) => void } },
+  text: string,
+): void {
+  $.ui.log(text);
+  $.ui.toast(text, { timeoutMs: 15_000 });
 }
 
 export const register: Register = (on: On, options: PluginOptions) => {
@@ -581,9 +634,10 @@ export const register: Register = (on: On, options: PluginOptions) => {
   on('session.compact', async ($, event, next) => {
     try {
       const apiKey = await getApiKey($, configured);
-      const result = await compactOrFallback(
+      const config = { ...configured, apiKey };
+      const result = await compactWithFetch(
         event.messages,
-        { ...configured, apiKey },
+        config,
         async (url, init) => {
           const response = await $.http.fetch(url, init);
           return {
@@ -593,16 +647,30 @@ export const register: Register = (on: On, options: PluginOptions) => {
           };
         },
       );
-      if (!result) {
-        $.ui.log(
-          'fallback (reduction below minimum)',
+      const dropped = result.decisions.filter((d) => d.action === 'drop').length;
+      const pct = result.charsBefore === 0 ? 0 : Math.round((1 - result.charsAfter / result.charsBefore) * 100);
+      $.ui.log(
+        `decisions: ${result.decisions
+          .map((d) => `${d.id}:${d.action[0]}/${d.reason}/${d.kind}/drop=${d.drop.toFixed(2)}`)
+          .join(' ')}`,
+      );
+      const reduction = result.charsBefore === 0 ? 0 : (result.charsBefore - result.charsAfter) / result.charsBefore;
+      if (reduction < (config.minReductionRatio ?? DEFAULTS.minReductionRatio)) {
+        notify(
+          $,
+          `fallback to built-in summary (dropped ${dropped}/${result.decisions.length} units, -${pct}% chars, below minimum)`,
         );
         return next(event);
       }
+      notify(
+        $,
+        `kept ${result.messages.length}/${event.messages.length} messages verbatim, dropped ${dropped} units (-${pct}% chars, no summary)`,
+      );
       return { messages: result.messages };
     } catch (error) {
-      $.ui.log(
-        `fallback (${error instanceof Error ? error.message : String(error)})`,
+      notify(
+        $,
+        `fallback to built-in summary (${error instanceof Error ? error.message : String(error)})`,
       );
       return next(event);
     }
