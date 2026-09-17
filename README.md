@@ -6,55 +6,48 @@ Continuous context compaction for LLM agents using TypeSafe's Jev model.
 
 Most context compaction asks an LLM to summarize old turns. A summary is
 lossy: a file path, exact error, constraint, or command can disappear even when
-it matters later. This library asks Jev two narrow questions for each chunk:
+it matters later. This library never rewrites anything. It only deletes tool
+calls and tool results Jev says are no longer needed, and it asks Jev while
+showing it the whole conversation. User and assistant text stays verbatim and
+in order.
 
-1. Can this chunk be removed without losing information needed to continue?
-2. What kind of information is it?
-
-Your code then deletes only chunks Jev says are safe to drop. Kept chunks remain
-verbatim and in their original order. The design is intended for continuous
-compaction on every agent turn, with a target of roughly 150 ms for a small
-request (actual latency depends on network and API load).
+The repository is both an npm package (`src/`) and a Claude Code plugin
+(`hooks/`, `.claude-plugin/`) that uses the package to replace Claude Code's
+built-in compaction summary with the original messages.
 
 ## How it works
 
-- Messages are split into sentence chunks for user/assistant content and line
-  chunks for tool output.
-- System chunks are pinned.
-- Chunks from the most recent two turns are kept by default.
-- Older candidates are sent to Jev in batches. Each chunk gets one `noul`
-  removal question and one `choice` kind question.
-- The full transcript is included in every batch so each decision has global
-  context.
-- User instructions and pending tasks are protected when their kind confidence
-  is at least `0.5`.
-- A chunk is dropped only when its removal probability is at least `0.8`, its
-  kind confidence is at least `0.5`, and its kind is not protected.
-- Low-confidence classifications and probabilities below the threshold are
-  kept.
+1. Every `tool_use` is paired with its `tool_result` by `tool_use_id`. Calls in
+   the first message or in the newest `preserveRecentMessages` messages are
+   pinned and never touched.
+2. The **state** sent to Jev is the whole conversation so far, oldest first,
+   with every tool result replaced by a short note (`ok, 4213 chars (omitted)`).
+   Tool inputs are included, texts are included, nothing is summarized.
+3. The state is fitted into `maxStateTokens` (25k by default) in stages, each
+   applied only if the previous one was not enough: tool inputs truncated to
+   1000, then 200, then 60 characters; long texts abridged to head + tail,
+   oldest non-pinned messages first; old non-pinned messages collapsed to a
+   `[… N chars omitted …]` note. If it still does not fit, compaction throws.
+4. For every non-pinned call Jev gets two `noul` questions: should the **call**
+   stay (knowing it was made, with its input, still matters), and should the
+   **result** stay verbatim (its contents are still needed and re-running the
+   tool would not do).
+5. Questions are split into as many requests as needed so state plus questions
+   stays under `maxRequestTokens` (30k by default, under Jev's 32k request
+   limit). The same full state is resent with every request; requests run
+   concurrently and their answers are merged.
+6. Decisions per call, against `keepThreshold`:
+   - `keepResult ≥ threshold` → keep call and result;
+   - else `keepCall ≥ threshold` → keep the call, replace the result with a
+     one-line `[tool result removed during compaction: N chars; re-run the tool
+     if needed]` note;
+   - else → remove the call together with its result.
+7. The message list is rebuilt: a message that loses all its content is
+   removed, untouched messages are returned as the same objects, and no result
+   is ever left without its call.
 
-The TypeSafe documentation says question count is limited by the request token
-budget rather than a fixed count: about 32,000 tokens, or roughly 150,000
-characters of English text, shared by state and questions. It does not document
-an independent maximum state size or a numeric maximum question count. This
-package therefore uses a conservative default of 64 questions per call
-(32 chunks), marked **unverified** as a server-side numeric limit. Override
-`maxQuestionsPerCall` if your state or account needs a smaller batch.
-
-The HTTP response documented by TypeSafe is:
-
-```json
-{
-  "model": "jev-latest",
-  "answers": {
-    "question_name": {
-      "type": "noul",
-      "noul": 0.92
-    }
-  },
-  "usage": { "input_tokens": 312, "output_tokens": 48 }
-}
-```
+Jev failures, malformed answers, a missing key, or a history that cannot be
+fitted throw; the caller (or the Claude Code hook) decides what to fall back to.
 
 ## Install and usage
 
@@ -64,99 +57,96 @@ export TYPESAFE_API_KEY=...
 ```
 
 ```ts
-import { compactMessages } from 'fast-jev-compaction';
+import { compactMessages, reductionRatio, type Message } from 'fast-jev-compaction';
 
-const { messages, result } = await compactMessages(messages, {
-  goal: 'Fix the checkout parser while preserving the public API.',
-  dropThreshold: 0.8,
-  preserveRecentTurns: 2,
-});
+const transcript: Message[] = [
+  { role: 'user', text: 'Fix the failing test. Never edit src/generated.', toolUses: [] },
+  {
+    role: 'assistant',
+    text: '',
+    toolUses: [{ tool_use_id: 'toolu_1', tool: 'Read', input: { file_path: 'src/a.ts' } }],
+  },
+  { role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: 'toolu_1', text: '…file…' }] },
+  // …
+];
 
-console.log(messages);
-console.log(result.stats);
+const result = await compactMessages(transcript, { preserveRecentMessages: 4 });
+console.log(result.messages, result.decisions, result.stats);
+if (reductionRatio(result) < 0.25) {
+  // not worth it: keep the original transcript, or summarize instead
+}
 ```
 
-For a lower-level workflow:
+`Message` is a subset of Claude Code's `SessionMessage`, so a session transcript
+can be passed in as is.
 
-```ts
-import { chunkMessages, compact } from 'fast-jev-compaction';
+To bring your own transport, implement `JevAsker` (one `ask(state, questions)`
+method) and call `compact(messages, asker, options)`; `buildJevRequest` and
+`parseJevResponse` give you the HTTP request body and response validation.
+The building blocks (`collectToolCalls`, `fitState`, `batchCalls`,
+`decideCall`, `applyDecisions`) are exported too.
 
-const chunks = chunkMessages(transcript, { mode: 'sentence' });
-const result = await compact(chunks, {
-  protectedKinds: ['user_instruction', 'pending_task'],
-});
-```
-
-`apiKey` defaults to `process.env.TYPESAFE_API_KEY`. The live demo uses the
-same environment variable. Never commit the key or put it in a source file.
+`apiKey` defaults to `process.env.TYPESAFE_API_KEY`. Never commit the key or
+put it in a source file.
 
 ## Options
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `apiKey` | `TYPESAFE_API_KEY` | TypeSafe API key |
+| `apiKey` | `TYPESAFE_API_KEY` | TypeSafe API key (`compactMessages`/`JevClient`) |
 | `model` | `jev-latest` | Jev model name |
 | `baseUrl` | `https://api.typesafe.ai/v1/systemone` | System One endpoint |
-| `goal` | `''` | Ongoing task description included in state |
-| `dropThreshold` | `0.8` | Minimum removal probability to consider dropping |
-| `minKindConfidence` | `0.5` | Minimum kind confidence for dropping/protection |
-| `protectedKinds` | `user_instruction`, `pending_task` | Kinds that remain protected |
-| `preserveRecentTurns` | `2` | Number of newest turns always kept |
-| `maxQuestionsPerCall` | `64` | Conservative, unverified numeric batch cap |
 | `fetch` | native `fetch` | Injectable fetch implementation for tests |
+| `goal` | last 3 user prompts | Ongoing task description included in the state |
+| `keepThreshold` | `0.5` | Minimum keep probability for a call or result to stay |
+| `preserveRecentMessages` | `6` | Newest messages never touched (the first is always kept) |
+| `maxStateTokens` | `25000` | Estimated token ceiling for the state |
+| `maxRequestTokens` | `30000` | Estimated ceiling for state plus one batch of questions |
+| `charsPerToken` | `3.5` | Characters per token used for the estimates |
+
+`result.stats` reports message and character counts before and after, the
+per-reason decision counts, the state size in estimated tokens, which fitting
+stage was needed, and the number of requests.
 
 ## Limitations
 
-- The library can delete chunks, but it cannot condense or rewrite them.
-- Calibration is at the group/request level; confidence is not a proof that a
-  chunk is safe to delete.
-- The full transcript is repeated in each batch. Keep batches within the
-  documented roughly 32,000-token request budget.
-- Every chunk uses two questions, so a 64-question call handles 32 candidate
-  chunks. The API's returned `usage` fields are the best basis for cost
-  estimates; actual cost depends on state size, batch count, and account
-  pricing.
-- A failed or unexpected Jev response fails the compaction call rather than
-  silently deleting content.
+- Only tool calls and results are candidates; text messages are never removed
+  or shortened in the output (they are only abridged in the state Jev sees).
+- Token sizes are estimates from character counts, not a tokenizer.
+- Calibration is at the request level; a probability is not a proof that a
+  result is safe to delete. The assistant can always re-run the tool.
+- The full state is repeated with every request, so a history near the state
+  ceiling costs one request per handful of questions.
 
-## Claude Code mod
+## Claude Code plugin
 
-The repository includes an early-access Claude Code function-hook plugin under
-[`plugin/`](plugin/). It can return Jev-selected original messages from
-`session.compact` and falls back to Claude Code's built-in summary on errors or
-insufficient reduction. See [`plugin/README.md`](plugin/README.md) for
-installation, configuration, and the Claude Code 2.1.274 type reference.
-
-## Prior art
-
-The protected and classified keep categories mirror the information that
-compaction prompts from Claude Code (third-party extracted), Gemini CLI,
-OpenAI Codex CLI, and Cline explicitly ask agents to preserve: user intent,
-constraints, decisions, files and symbols, errors and fixes, completed work,
-pending tasks, blockers, and next steps. This library uses those categories
-only as typed decisions and deletes old chunks verbatim instead of asking a
-generative model to rewrite them.
+The repository root is a Claude Code function-hook plugin: `hooks/fast-jev.ts`
+is a thin adapter that feeds `session.compact` transcripts through `src/` and
+falls back to Claude Code's built-in summary on errors or insufficient
+reduction. See [`hooks/README.md`](hooks/README.md) for installation,
+configuration, and the Claude Code 2.1.274 type reference.
 
 ## Development
 
 ```sh
 npm install
-npm run typecheck
+npm run typecheck        # library + hook
 npm test
 npm run build
+npm run validate:plugin  # claude plugin validate
 TYPESAFE_API_KEY="$(cat ~/.typesafe_key)" npm run demo
 ```
 
-The unit tests mock `fetch` and never contact TypeSafe. The demo is the live
+The unit tests use a fake Jev and never contact TypeSafe. The demo is the live
 network check.
 
 ## Animated demo (macOS)
 
 `demo/JevDemo` is a small native SwiftUI app that plays a scripted, dramatized
-version of the compaction flow inside a Claude Code-style terminal: transcript
-chunks are scanned, marked green (keep) or red (drop), and the red ones
-collapse away. It uses a canned transcript and never calls the API; it exists
-to be screen recorded.
+version of the compaction flow inside a Claude Code-style terminal: the tool
+calls of a canned transcript are scored, results and calls Jev lets go turn red
+and collapse away, and the rest stays verbatim. It never calls the API; it
+exists to be screen recorded.
 
 ```sh
 demo/JevDemo/build.sh   # builds demo/JevDemo/build/JevDemo.app and launches it

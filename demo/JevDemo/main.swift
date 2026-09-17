@@ -15,56 +15,99 @@ enum Verdict: Equatable {
     }
 }
 
+/// Jev's two answers about one tool call: keep the call, keep its full result.
+struct CallScore: Equatable {
+    let call: Double
+    let result: Double
+}
+
 struct Chunk: Identifiable, Equatable {
     let id: Int
     let role: Role
     let text: String
-    let kind: String
-    let drop: Double
+    /// The tool call this line belongs to (header and its result lines share it); nil for text.
+    let callId: String?
+    let score: CallScore?
     let recent: Bool
 
+    var isText: Bool { role == .user || role == .assistant }
+
+    /// keepResult ≥ 0.5 → keep call and result; else keepCall ≥ 0.5 → keep the call,
+    /// the result becomes a one-line note; else the call goes with its result.
     var verdict: Verdict {
-        if recent { return .keep("recent") }
-        if kind == "user_instruction" || kind == "pending_task" { return .keep("protected") }
-        if drop >= 0.8 { return .drop(String(format: "drop %.2f", drop)) }
-        if drop >= 0.5 { return .keep(String(format: "%.2f < 0.80", drop)) }
-        return .keep(String(format: "drop %.2f", drop))
+        if isText { return .keep("text") }
+        if recent { return .keep("pinned") }
+        guard let s = score else { return .keep("pinned") }
+        if s.result >= 0.5 { return .keep(String(format: "call %.2f · result %.2f", s.call, s.result)) }
+        if s.call >= 0.5 {
+            return role == .toolHeader
+                ? .keep(String(format: "call %.2f · result %.2f → note", s.call, s.result))
+                : .drop(String(format: "result %.2f", s.result))
+        }
+        return .drop(String(format: "call %.2f · result %.2f", s.call, s.result))
+    }
+
+    var badgeLabel: String {
+        if isText { return "text" }
+        if recent { return "pinned" }
+        return callId ?? ""
     }
 }
 
 let transcript: [Chunk] = {
     var id = 0
-    func c(_ role: Role, _ text: String, _ kind: String, _ drop: Double, recent: Bool = false) -> Chunk {
+    func text(_ role: Role, _ text: String, recent: Bool = false) -> Chunk {
         id += 1
-        return Chunk(id: id, role: role, text: text, kind: kind, drop: drop, recent: recent)
+        return Chunk(id: id, role: role, text: text, callId: nil, score: nil, recent: recent)
     }
-    return [
-        c(.user, "Fix the checkout parser so parseLineItems handles quantities over 999 without truncating. Keep the public API unchanged.", "user_instruction", 0.06),
-        c(.assistant, "I'll read the parser and its tests first.", "chatter", 0.93),
-        c(.toolHeader, "Read(src/checkout/parser.ts)", "file_reference", 0.41),
-        c(.toolLine, "Read 212 lines", "stale_tool_output", 0.97),
-        c(.toolLine, "41  const qty = Number(raw.slice(0, 3));", "file_reference", 0.22),
-        c(.toolLine, "42  if (Number.isNaN(qty)) throw new ParseError(raw);", "stale_tool_output", 0.89),
-        c(.toolLine, "43  return { sku, qty, price };", "stale_tool_output", 0.91),
-        c(.toolHeader, "Bash(npm test -- parser)", "stale_tool_output", 0.84),
-        c(.toolLine, "FAIL tests/parser.test.ts > parses quantities over 999", "error", 0.09),
-        c(.toolLine, "expected 1200, received 120", "error", 0.11),
-        c(.toolLine, "Tests: 1 failed, 23 passed", "stale_tool_output", 0.95),
-        c(.toolLine, "Duration 1.42s", "stale_tool_output", 0.98),
-        c(.assistant, "slice(0, 3) truncates to three digits. I'll capture the full quantity with a regex instead.", "decision", 0.14),
-        c(.assistant, "Let me check where parseLineItems is called.", "chatter", 0.92),
-        c(.toolHeader, "Grep(parseLineItems)", "stale_tool_output", 0.86),
-        c(.toolLine, "src/checkout/index.ts:14", "file_reference", 0.33),
-        c(.toolLine, "src/api/orders.ts:88", "file_reference", 0.35),
-        c(.toolLine, "tests/parser.test.ts:5", "stale_tool_output", 0.88),
-        c(.toolHeader, "Edit(src/checkout/parser.ts)", "decision", 0.79),
-        c(.toolLine, "Updated 1 file (+3 -1)", "stale_tool_output", 0.90),
-        c(.assistant, "Still to do: make sure the raw line appears in ParseError messages.", "pending_task", 0.12),
-        c(.toolHeader, "Bash(npm test)", "stale_tool_output", 0.0, recent: true),
-        c(.toolLine, "Tests: 24 passed", "stale_tool_output", 0.0, recent: true),
-        c(.assistant, "All 24 tests pass and the public API is unchanged.", "decision", 0.0, recent: true),
-        c(.user, "Great — now handle the ParseError message.", "user_instruction", 0.0, recent: true),
-    ]
+    func tool(_ callId: String, _ header: String, _ lines: [String], _ score: CallScore?, recent: Bool = false) -> [Chunk] {
+        var out: [Chunk] = []
+        id += 1
+        out.append(Chunk(id: id, role: .toolHeader, text: header, callId: callId, score: score, recent: recent))
+        for line in lines {
+            id += 1
+            out.append(Chunk(id: id, role: .toolLine, text: line, callId: callId, score: score, recent: recent))
+        }
+        return out
+    }
+    var t: [Chunk] = []
+    t.append(text(.user, "Fix the checkout parser so parseLineItems handles quantities over 999 without truncating. Keep the public API unchanged."))
+    t.append(text(.assistant, "I'll read the parser and its tests first."))
+    t += tool("t1", "Read(src/checkout/parser.ts)", [
+        "Read 212 lines",
+        "41  const qty = Number(raw.slice(0, 3));",
+        "42  if (Number.isNaN(qty)) throw new ParseError(raw);",
+        "43  return { sku, qty, price };",
+    ], CallScore(call: 0.18, result: 0.07))
+    t += tool("t2", "Bash(npm test -- parser)", [
+        "FAIL tests/parser.test.ts > parses quantities over 999",
+        "expected 1200, received 120",
+        "Tests: 1 failed, 23 passed",
+        "Duration 1.42s",
+    ], CallScore(call: 0.64, result: 0.21))
+    t.append(text(.assistant, "slice(0, 3) truncates to three digits. I'll capture the full quantity with a regex instead."))
+    t.append(text(.assistant, "Let me check where parseLineItems is called."))
+    t += tool("t3", "Grep(parseLineItems)", [
+        "src/checkout/index.ts:14",
+        "src/api/orders.ts:88",
+        "tests/parser.test.ts:5",
+    ], CallScore(call: 0.22, result: 0.09))
+    t += tool("t4", "Edit(src/checkout/parser.ts)", [
+        "Updated 1 file (+3 -1)",
+    ], CallScore(call: 0.71, result: 0.66))
+    t.append(text(.assistant, "Still to do: make sure the raw line appears in ParseError messages."))
+    t += tool("t5", "Bash(npm test)", ["Tests: 24 passed"], nil, recent: true)
+    t.append(text(.assistant, "All 24 tests pass and the public API is unchanged.", recent: true))
+    t.append(text(.user, "Great — now handle the ParseError message.", recent: true))
+    return t
+}()
+
+let candidateCalls: [String] = {
+    var seen: [String] = []
+    for c in transcript where c.role == .toolHeader && !c.recent {
+        if let id = c.callId, !seen.contains(id) { seen.append(id) }
+    }
+    return seen
 }()
 
 // MARK: - Palette
@@ -162,8 +205,8 @@ final class Demo: ObservableObject {
             try await sleep(1.6)
 
             phase = .scanning
-            let candidates = transcript.filter { !$0.recent }.count
-            status = "✻ Asking jev-latest \(candidates * 2) questions (\(candidates) chunks × removable? + kind)…"
+            let candidates = candidateCalls.count
+            status = "✻ Asking jev-latest \(candidates * 2) questions (\(candidates) tool calls × keep call? + keep result?) · state = whole history, tool outputs omitted · 1 request"
             try await sleep(0.9)
 
             for chunk in transcript {
@@ -179,11 +222,13 @@ final class Demo: ObservableObject {
             try await sleep(0.4)
             withAnimation(.easeOut(duration: 0.4)) { beamY = nil }
             let dropped = transcript.filter { $0.verdict.isDrop }
-            status = "\(dropped.count) chunks marked safe to drop · \(transcript.count - dropped.count) kept verbatim"
+            let droppedCalls = candidateCalls.filter { id in transcript.contains { $0.callId == id && $0.role == .toolHeader && $0.verdict.isDrop } }.count
+            let droppedResults = candidateCalls.filter { id in transcript.contains { $0.callId == id && $0.role == .toolHeader && !$0.verdict.isDrop && $0.score.map { $0.result < 0.5 } == true } }.count
+            status = "\(droppedCalls) calls dropped with their results · \(droppedResults) results replaced by a note · text kept verbatim"
             try await sleep(1.7)
 
             phase = .collapsing
-            status = "Deleting dropped chunks…"
+            status = "Deleting dropped tool calls and results…"
             if let first = transcript.first { scrollTo(first.id, anchor: .top) }
             try await sleep(0.5)
             let charsBefore = transcript.reduce(0) { $0 + $1.text.count }
@@ -201,7 +246,7 @@ final class Demo: ObservableObject {
             withAnimation(.spring(duration: 0.8)) { context = 0.31 }
             phase = .done
             status = "✓ Compacted in 148 ms"
-            summary = "\(transcript.count) chunks → \(transcript.count - dropped.count) kept · \(dropped.count) dropped · \(charsBefore) → \(charsAfter) chars · 1 request · 0 summaries · kept text is verbatim"
+            summary = "\(transcript.count) lines → \(transcript.count - dropped.count) kept · \(dropped.count) removed · \(charsBefore) → \(charsAfter) chars · state ~1.1k tokens · 1 request · 0 summaries · kept text is verbatim"
         } catch {}
     }
 }
@@ -295,7 +340,7 @@ struct ChunkView: View {
         case .drop(let r): label = r
         }
         return HStack(spacing: 6) {
-            Text(chunk.recent ? "recent" : chunk.kind)
+            Text(chunk.badgeLabel)
                 .foregroundStyle(color.opacity(0.85))
             Text(chunk.verdict.isDrop ? "DROP" : "KEEP")
                 .bold()
@@ -303,7 +348,7 @@ struct ChunkView: View {
                 .padding(.vertical, 1)
                 .background(RoundedRectangle(cornerRadius: 3).fill(color.opacity(0.22)))
                 .foregroundStyle(color)
-            if !chunk.recent {
+            if !chunk.recent && !chunk.isText {
                 Text(label).foregroundStyle(color.opacity(0.7))
             }
         }
