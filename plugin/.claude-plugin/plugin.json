@@ -1,6 +1,6 @@
 {
   "name": "fast-jev-compaction",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Verbatim Jev-guided compaction for Claude Code sessions.",
   "license": "MIT",
   "userConfig": {
@@ -10,22 +10,10 @@
       "description": "TypeSafe API key. Leave unset to use TYPESAFE_API_KEY.",
       "sensitive": true
     },
-    "dropThreshold": {
+    "keepThreshold": {
       "type": "number",
-      "title": "Drop threshold",
-      "description": "Minimum Jev removal probability.",
-      "default": 0.8
-    },
-    "toolOutputDropThreshold": {
-      "type": "number",
-      "title": "Tool output drop threshold",
-      "description": "Minimum Jev removal probability for units that contain tool results (file reads, command output).",
-      "default": 0.5
-    },
-    "minKindConfidence": {
-      "type": "number",
-      "title": "Minimum kind confidence",
-      "description": "Minimum confidence for protected kinds and drops.",
+      "title": "Keep threshold",
+      "description": "Minimum Jev probability that a tool call or tool result is still needed; below it the item is removed.",
       "default": 0.5
     },
     "preserveRecentMessages": {
@@ -46,17 +34,23 @@
       "description": "Minimum estimated character reduction required to replace history.",
       "default": 0.25
     },
-    "maxWindowChars": {
+    "maxStateTokens": {
       "type": "number",
-      "title": "Maximum Jev window characters",
-      "description": "Maximum preview characters sent in one Jev request.",
-      "default": 60000
+      "title": "Maximum Jev state tokens",
+      "description": "Estimated token budget for the conversation state sent with every Jev request.",
+      "default": 25000
     },
-    "previewChars": {
+    "maxRequestTokens": {
       "type": "number",
-      "title": "Unit preview characters",
-      "description": "Maximum text and tool-input preview length per unit.",
-      "default": 800
+      "title": "Maximum Jev request tokens",
+      "description": "Estimated token budget for state plus questions in one Jev request.",
+      "default": 30000
+    },
+    "charsPerToken": {
+      "type": "number",
+      "title": "Characters per token",
+      "description": "Ratio used to estimate token counts from character counts.",
+      "default": 3.5
     },
     "model": {
       "type": "string",
