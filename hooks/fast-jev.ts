@@ -65,7 +65,6 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
     'preserveRecentMessages',
     'maxStateTokens',
     'maxRequestTokens',
-    'charsPerToken',
     'truncateHeadChars',
   ] as const) {
     const value = options[key];
@@ -187,7 +186,7 @@ export function summarize(result: CompactResult): string {
   ].filter(Boolean);
   return `${percent(reductionRatio(result))} reduction; ${
     parts.join(', ') || 'no tool calls'
-  }; state ~${stats.stateTokens} tokens in ${stats.requests} request(s)`;
+  }; state ~${stats.stateTokens} tokens (${stats.stateStage}) in ${stats.requests} request(s)`;
 }
 
 export function decisionLog(result: CompactResult): string {
@@ -272,10 +271,14 @@ export const register: Register = (on: On, options: PluginOptions) => {
       if ((context.percent ?? 0) < configured.compactAtPercent) return next(event);
       compacting = true;
       await $.session.compact();
-      return next(event);
+    } catch (error) {
+      $.ui.log(
+        `auto-compact skipped (${error instanceof Error ? error.message : String(error)})`,
+      );
     } finally {
       compacting = false;
     }
+    return next(event);
   });
 };
 

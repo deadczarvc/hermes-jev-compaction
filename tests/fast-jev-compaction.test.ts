@@ -7,11 +7,13 @@ import {
   compact,
   compactMessages,
   decideCall,
+  estimateTokens,
   fitState,
   JevClient,
   parseJevResponse,
   reductionRatio,
   resolveOptions,
+  type HistoryToolCall,
   type JevAsker,
   type JevQuestions,
   type Message,
@@ -65,7 +67,6 @@ function fakeJev(answer: (name: string) => number, seen: Seen[] = []): JevAsker 
 
 const fit = {
   maxStateTokens: 25_000,
-  charsPerToken: 3.5,
   preserveRecentMessages: 0,
   goal: 'fix the test',
 };
@@ -77,7 +78,6 @@ describe('options', () => {
       preserveRecentMessages: 6,
       maxStateTokens: 25_000,
       maxRequestTokens: 30_000,
-      charsPerToken: 3.5,
       truncateHeadChars: 300,
     });
     expect(resolveOptions({
@@ -89,6 +89,17 @@ describe('options', () => {
       preserveRecentMessages: 2,
       truncateHeadChars: 0,
     });
+  });
+});
+
+describe('token estimate', () => {
+  it('charges words, digits and symbols separately and never undercounts JSON badly', () => {
+    expect(estimateTokens('')).toBe(0);
+    expect(estimateTokens('hello world')).toBe(2);
+    expect(estimateTokens('internationalization')).toBe(4);
+    expect(estimateTokens('12345678')).toBe(4);
+    const json = JSON.stringify({ file_path: '/Users/x/src/a.ts', old_string: 'a = 1;', n: 42 });
+    expect(estimateTokens(json)).toBeGreaterThanOrEqual(Math.ceil(json.length / 3));
   });
 });
 
@@ -124,7 +135,7 @@ describe('state fitting', () => {
       tool: 'Read',
       result: `ok, ${fileA.length} chars (omitted)`,
     });
-    expect(state.history[4]?.tool_calls?.[0]?.result).toMatch(/^error, /);
+    expect((state.history[4]?.tool_calls?.[0] as HistoryToolCall).result).toMatch(/^error, /);
   });
 
   it('defaults the goal to the latest user prompts', () => {
@@ -147,7 +158,42 @@ describe('state fitting', () => {
     expect(stage).toBe('inputs<=200');
     expect(tokens).toBeLessThanOrEqual(300);
     expect(state.history[0]?.text).toBe('start');
-    expect(state.history[1]?.tool_calls?.[0]?.input.length).toBeLessThanOrEqual(200);
+    expect((state.history[1]?.tool_calls?.[0] as HistoryToolCall).input.length).toBeLessThanOrEqual(200);
+  });
+
+  it('shrinks old tool calls to one line each when nothing else is left to cut', () => {
+    const messages = [message('user', 'start')];
+    for (let i = 0; i < 40; i += 1) {
+      messages.push(call(`c${i}`, 'Read', { file_path: `/repo/src/module-${i}.ts` }, 'x'), result(`c${i}`, 'x'));
+    }
+    messages.push(message('assistant', 'done'));
+    const calls = collectToolCalls(messages, 1);
+    const full = fitState(messages, calls, { ...fit, preserveRecentMessages: 1 });
+    const compacted = fitState(messages, calls, {
+      ...fit,
+      preserveRecentMessages: 1,
+      maxStateTokens: Math.floor(full.tokens * 0.8),
+    });
+    expect(compacted.stage).toBe('old calls compacted');
+    expect(compacted.tokens).toBeLessThanOrEqual(Math.floor(full.tokens * 0.8));
+    expect(compacted.tokens).toBeGreaterThanOrEqual(estimateTokens(JSON.stringify(compacted.state)));
+    expect(compacted.state.history[1]?.tool_calls?.[0]).toBe(
+      't1 Read file_path=/repo/src/module-0.ts → ok 1ch',
+    );
+    expect(compacted.state.history.at(-1)?.text).toBe('done');
+
+    const merged = fitState(messages, calls, {
+      ...fit,
+      preserveRecentMessages: 1,
+      maxStateTokens: Math.floor(full.tokens * 0.45),
+    });
+    expect(merged.stage).toBe('old calls merged');
+    expect(merged.tokens).toBeLessThanOrEqual(Math.floor(full.tokens * 0.45));
+    expect(merged.state.history).toHaveLength(3);
+    expect(merged.state.history[1]?.tool_calls).toHaveLength(40);
+    expect(merged.state.history[1]?.tool_calls?.[39]).toMatch(/^t40 Read /);
+    expect(merged.state.history[0]?.text).toBe('start');
+    expect(merged.state.history[2]?.text).toBe('done');
   });
 
   it('abridges long texts oldest-first and collapses old messages last', () => {
@@ -192,7 +238,7 @@ describe('question batching', () => {
     isError: false,
     pinned: false,
   }));
-  const options = { maxRequestTokens: 30_000, charsPerToken: 3.5 };
+  const options = { maxRequestTokens: 30_000 };
 
   it('puts everything in one request when it fits', () => {
     expect(batchCalls(calls, 1000, options)).toHaveLength(1);
@@ -264,6 +310,25 @@ describe('decisions', () => {
     const shortKept = applyDecisions(shortMessages, decisions, calls, 300);
     expect(shortKept[2]).toBe(shortMessages[4]);
     expect(shortKept[3]).toBe(shortMessages[5]);
+  });
+
+  it('honours truncateHeadChars, including a zero head', () => {
+    const messages = transcript();
+    const calls = collectToolCalls(messages, 0);
+    const decisions = [decideCall(calls[0]!, { keepCall: 0.9, keepResult: 0.1 }, { keepThreshold: 0.5 })];
+    const original = messages[2]!.toolResults![0]!.text;
+    const total = original.length;
+
+    const kept = applyDecisions(messages, decisions, calls, 50);
+    expect(kept[2]?.toolResults?.[0]?.text).toBe(
+      `${original.slice(0, 50)}\n[fast-jev-compaction truncated ${total - 50} chars of this tool result; re-run the tool if needed]`,
+    );
+    expect(kept[1]?.toolUses[0]?.text).toBe(kept[2]?.toolResults?.[0]?.text);
+
+    const noHead = applyDecisions(messages, decisions, calls, 0);
+    expect(noHead[2]?.toolResults?.[0]?.text).toBe(
+      `[fast-jev-compaction truncated ${total} chars of this tool result; re-run the tool if needed]`,
+    );
   });
 });
 

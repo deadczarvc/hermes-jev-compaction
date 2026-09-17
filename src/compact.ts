@@ -20,9 +20,11 @@ export const DEFAULT_OPTIONS: ResolvedCompactOptions = {
   preserveRecentMessages: 6,
   maxStateTokens: 25_000,
   maxRequestTokens: 30_000,
-  charsPerToken: 3.5,
   truncateHeadChars: 300,
 };
+
+/** Tokens the request envelope (`model`, key names) adds around state and questions. */
+const REQUEST_OVERHEAD_TOKENS = 20;
 
 function finite(value: number | undefined, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
@@ -43,7 +45,6 @@ export function resolveOptions(options: CompactOptions = {}): ResolvedCompactOpt
       1,
       finite(options.maxRequestTokens, DEFAULT_OPTIONS.maxRequestTokens),
     ),
-    charsPerToken: Math.max(0.1, finite(options.charsPerToken, DEFAULT_OPTIONS.charsPerToken)),
     truncateHeadChars: Math.max(
       0,
       Math.floor(finite(options.truncateHeadChars, DEFAULT_OPTIONS.truncateHeadChars)),
@@ -72,14 +73,14 @@ export function questionsFor(call: ToolCall): JevQuestions {
 export function batchCalls(
   calls: readonly ToolCall[],
   stateTokens: number,
-  options: Pick<ResolvedCompactOptions, 'maxRequestTokens' | 'charsPerToken'>,
+  options: Pick<ResolvedCompactOptions, 'maxRequestTokens'>,
 ): ToolCall[][] {
-  const budget = options.maxRequestTokens - stateTokens;
+  const budget = options.maxRequestTokens - stateTokens - REQUEST_OVERHEAD_TOKENS;
   const batches: ToolCall[][] = [];
   let current: ToolCall[] = [];
   let currentTokens = 0;
   for (const call of calls) {
-    const tokens = estimateTokens(JSON.stringify(questionsFor(call)), options.charsPerToken);
+    const tokens = estimateTokens(JSON.stringify(questionsFor(call)));
     if (current.length > 0 && currentTokens + tokens > budget) {
       batches.push(current);
       current = [];

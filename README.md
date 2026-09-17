@@ -27,7 +27,12 @@ built-in compaction summary with the original messages.
    applied only if the previous one was not enough: tool inputs truncated to
    1000, then 200, then 60 characters; long texts abridged to head + tail,
    oldest non-pinned messages first; old non-pinned messages collapsed to a
-   `[… N chars omitted …]` note. If it still does not fit, compaction throws.
+   `[… N chars omitted …]` note; old tool calls reduced to one line each
+   (`t12 Read file_path=src/a.ts → ok 480ch`); old call-less messages left
+   out; runs of old call-only messages folded into one entry. If it still
+   does not fit, compaction throws. Tokens are estimated without a tokenizer (a
+   word per six letters, half a token per digit, ~one per other symbol),
+   calibrated to land a little above the counts Jev reports.
 4. For every non-pinned call Jev gets two `noul` questions: should the **call**
    stay (knowing it was made, with its input, still matters), and should the
    **result** stay verbatim (its contents are still needed and re-running the
@@ -101,7 +106,6 @@ put it in a source file.
 | `preserveRecentMessages` | `6` | Newest messages never touched (the first is always kept) |
 | `maxStateTokens` | `25000` | Estimated token ceiling for the state |
 | `maxRequestTokens` | `30000` | Estimated ceiling for state plus one batch of questions |
-| `charsPerToken` | `3.5` | Characters per token used for the estimates |
 | `truncateHeadChars` | `300` | Characters of a dropped tool result retained before its note |
 
 `result.stats` reports message and character counts before and after, the
