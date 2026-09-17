@@ -535,7 +535,7 @@ export async function compactOrFallback(
 
 function optionConfig(options: PluginOptions): ModConfig {
   return {
-    apiKey: typeof options.apiKey === 'string' ? options.apiKey : undefined,
+    apiKey: typeof options.apiKey === 'string' && options.apiKey.length > 0 ? options.apiKey : undefined,
     dropThreshold: optionNumber(options, 'dropThreshold', DEFAULTS.dropThreshold),
     minKindConfidence: optionNumber(
       options,
@@ -571,7 +571,7 @@ async function getApiKey(
   $: { env: { get: (name: string) => Promise<string | undefined> } },
   config: ModConfig,
 ): Promise<string | undefined> {
-  return config.apiKey ?? (await $.env.get('TYPESAFE_API_KEY'));
+  return config.apiKey || (await $.env.get('TYPESAFE_API_KEY'));
 }
 
 export const register: Register = (on: On, options: PluginOptions) => {
@@ -595,14 +595,14 @@ export const register: Register = (on: On, options: PluginOptions) => {
       );
       if (!result) {
         $.ui.log(
-          'fast-jev-compaction: fallback (reduction below minimum)',
+          'fallback (reduction below minimum)',
         );
         return next(event);
       }
       return { messages: result.messages };
     } catch (error) {
       $.ui.log(
-        `fast-jev-compaction: fallback (${error instanceof Error ? error.message : String(error)})`,
+        `fallback (${error instanceof Error ? error.message : String(error)})`,
       );
       return next(event);
     }
