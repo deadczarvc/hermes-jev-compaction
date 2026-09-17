@@ -8,44 +8,25 @@ import type {
   TurnCompleteInput,
 } from 'claude-code';
 
-type Kind =
-  | 'user_instruction'
-  | 'decision'
-  | 'file_reference'
-  | 'error'
-  | 'pending_task'
-  | 'stale_tool_output'
-  | 'chatter'
-  | 'other';
-
-const KIND_CRITERIA: Record<Kind, string> = {
-  user_instruction:
-    'An instruction, constraint, preference, or request from the user',
-  decision: 'A design/implementation decision or key finding',
-  file_reference:
-    'A short mention of a file path, symbol, command, URL or identifier that will be needed (not the file contents themselves)',
-  error: 'An error message or its fix',
-  pending_task: 'Work that still needs to be done',
-  stale_tool_output:
-    'The result of a tool call (file contents, directory listing, command or test output, search results) that the assistant already used; it can be re-read or re-run later',
-  chatter: 'Greetings, acknowledgements, filler',
-  other: 'Other content that does not fit the categories above',
-};
-
 const DEFAULTS = {
-  dropThreshold: 0.8,
-  toolOutputDropThreshold: 0.5,
-  minKindConfidence: 0.5,
-  protectedKinds: ['user_instruction', 'pending_task'] as Kind[],
+  keepThreshold: 0.5,
   preserveRecentMessages: 6,
   compactAtPercent: 60,
   minReductionRatio: 0.25,
-  maxWindowChars: 60_000,
-  previewChars: 800,
+  maxStateTokens: 25_000,
+  maxRequestTokens: 30_000,
+  charsPerToken: 3.5,
   model: 'jev-latest',
 };
 
 const SYSTEM_ONE_URL = 'https://api.typesafe.ai/v1/systemone';
+
+const CONTEXT =
+  'A coding assistant conversation is being compacted to free context. `history` is the whole conversation so far, oldest first; tool outputs are replaced by a short `result` note and long texts may be abridged. Each question asks whether one tool call, or the full output of that call, still needs to stay in the history verbatim. Whatever is not kept is deleted permanently, but the assistant can always re-run a tool or re-read a file.';
+
+const INPUT_CHARS = [1000, 200, 60];
+const TEXT_HEAD = 400;
+const TEXT_TAIL = 150;
 
 export type HookFetchInit = {
   method?: string;
@@ -64,73 +45,96 @@ export type HookFetch = (
   init?: HookFetchInit,
 ) => Promise<HookFetchResponse>;
 
-export type CompactionUnit = {
-  id: string;
-  messages: SessionMessage[];
-  pinned: boolean;
-  toolOutput: boolean;
-  preview: string;
-};
-
-export type UnitDecision = {
-  id: string;
-  drop: number;
-  kind: Kind;
-  kindConfidence: number;
-  action: 'keep' | 'drop';
-  reason:
-    | 'pinned'
-    | 'protected_kind'
-    | 'below_threshold'
-    | 'low_confidence'
-    | 'dropped';
-};
-
 export type ModConfig = {
   apiKey?: string;
-  dropThreshold?: number;
-  toolOutputDropThreshold?: number;
-  minKindConfidence?: number;
-  protectedKinds?: Kind[];
+  keepThreshold?: number;
   preserveRecentMessages?: number;
   compactAtPercent?: number;
   minReductionRatio?: number;
-  maxWindowChars?: number;
-  previewChars?: number;
+  maxStateTokens?: number;
+  maxRequestTokens?: number;
+  charsPerToken?: number;
   model?: string;
   goal?: string;
 };
 
 type ResolvedConfig = {
   apiKey?: string;
-  dropThreshold: number;
-  toolOutputDropThreshold: number;
-  minKindConfidence: number;
-  protectedKinds: Set<Kind>;
+  keepThreshold: number;
   preserveRecentMessages: number;
   compactAtPercent: number;
   minReductionRatio: number;
-  maxWindowChars: number;
-  previewChars: number;
+  maxStateTokens: number;
+  maxRequestTokens: number;
+  charsPerToken: number;
   model: string;
   goal: string;
 };
 
-type JevAnswer =
-  | { type?: 'noul'; noul: number }
-  | {
-      type?: 'choice';
-      choice: string;
-      confidence: number;
-      probabilities?: Record<string, number>;
-    };
-
-type JevResponse = {
-  answers?: Record<string, JevAnswer>;
+export type ToolCall = {
+  id: string;
+  tool_use_id: string;
+  tool: string;
+  input: Record<string, unknown>;
+  callIndex: number;
+  resultIndex: number;
+  resultChars: number;
+  isError: boolean;
+  pinned: boolean;
 };
+
+export type CallAnswer = {
+  keepCall: number;
+  keepResult: number;
+};
+
+export type CallDecision = CallAnswer & {
+  id: string;
+  tool: string;
+  action: 'keep' | 'drop_result' | 'drop_call';
+  reason: 'pinned' | 'kept' | 'result_dropped' | 'call_dropped';
+};
+
+type HistoryToolCall = {
+  id: string;
+  tool: string;
+  input: string;
+  result: string;
+};
+
+type HistoryEntry = {
+  i: number;
+  role: 'user' | 'assistant';
+  text: string;
+  tool_calls?: HistoryToolCall[];
+};
+
+export type JevState = {
+  context: string;
+  goal: string;
+  history: HistoryEntry[];
+};
+
+export type CompactionOutput = {
+  messages: SessionMessage[];
+  decisions: CallDecision[];
+  charsBefore: number;
+  charsAfter: number;
+  stateTokens: number;
+  requests: number;
+};
+
+type JevAnswer = { type?: 'noul'; noul: number };
+type JevResponse = { answers?: Record<string, JevAnswer> };
 
 function truncate(text: string, limit: number): string {
   return text.length <= limit ? text : `${text.slice(0, Math.max(0, limit - 1))}…`;
+}
+
+function abridge(text: string, head: number, tail: number): string {
+  if (text.length <= head + tail + 40) return text;
+  const omitted = text.length - head - tail;
+  return `${text.slice(0, head)}\n[… ${omitted} chars omitted …]\n${text.slice(-tail)}`;
 }
 
 function optionNumber(
@@ -152,34 +156,12 @@ function optionString(
 }
 
 function resolveConfig(options: PluginOptions | ModConfig): ResolvedConfig {
-  const protectedKinds = options.protectedKinds;
   return {
     apiKey:
       typeof options.apiKey === 'string' && options.apiKey.length > 0
         ? options.apiKey
         : undefined,
-    dropThreshold: optionNumber(
-      options,
-      'dropThreshold',
-      DEFAULTS.dropThreshold,
-    ),
-    toolOutputDropThreshold: optionNumber(
-      options,
-      'toolOutputDropThreshold',
-      DEFAULTS.toolOutputDropThreshold,
-    ),
-    minKindConfidence: optionNumber(
-      options,
-      'minKindConfidence',
-      DEFAULTS.minKindConfidence,
-    ),
-    protectedKinds: new Set(
-      Array.isArray(protectedKinds)
-        ? protectedKinds.filter((kind): kind is Kind =>
-            Object.prototype.hasOwnProperty.call(KIND_CRITERIA, kind),
-          )
-        : DEFAULTS.protectedKinds,
-    ),
+    keepThreshold: optionNumber(options, 'keepThreshold', DEFAULTS.keepThreshold),
     preserveRecentMessages: Math.max(
       0,
       Math.floor(
@@ -200,191 +182,107 @@ function resolveConfig(options: PluginOptions | ModConfig): ResolvedConfig {
       'minReductionRatio',
       DEFAULTS.minReductionRatio,
     ),
-    maxWindowChars: Math.max(
+    maxStateTokens: Math.max(
       1,
-      Math.floor(
-        optionNumber(options, 'maxWindowChars', DEFAULTS.maxWindowChars),
-      ),
+      optionNumber(options, 'maxStateTokens', DEFAULTS.maxStateTokens),
     ),
-    previewChars: Math.max(
+    maxRequestTokens: Math.max(
       1,
-      Math.floor(optionNumber(options, 'previewChars', DEFAULTS.previewChars)),
+      optionNumber(options, 'maxRequestTokens', DEFAULTS.maxRequestTokens),
+    ),
+    charsPerToken: Math.max(
+      0.1,
+      optionNumber(options, 'charsPerToken', DEFAULTS.charsPerToken),
     ),
     model: optionString(options, 'model', DEFAULTS.model),
     goal: optionString(options, 'goal', ''),
   };
 }
 
-function hasMatchingToolResult(
-  assistant: SessionMessage,
-  user: SessionMessage,
+export function estimateTokens(text: string, charsPerToken: number): number {
+  return Math.ceil(text.length / charsPerToken);
+}
+
+function isPinned(
+  index: number,
+  total: number,
+  preserveRecentMessages: number,
 ): boolean {
-  if (assistant.role !== 'assistant' || assistant.toolUses.length === 0) {
-    return false;
-  }
-  const ids = new Set(assistant.toolUses.map((tool) => tool.tool_use_id));
-  const resultIds = new Set(
-    (user.toolResults ?? []).map((result) => result.tool_use_id),
-  );
-  return [...ids].every((id) => resultIds.has(id));
+  return index === 0 || index >= total - preserveRecentMessages;
 }
 
-function toolPreview(tool: ToolUseSummary, limit: number): string {
-  let input = '';
-  try {
-    input = JSON.stringify(tool.input);
-  } catch {
-    input = '[unserializable input]';
-  }
-  return `${tool.tool}: ${truncate(input, limit)}`;
-}
-
-function unitPreview(messages: readonly SessionMessage[], limit: number): string {
-  const roles = messages.map((message) => message.role).join('+');
-  const tools = messages
-    .flatMap((message) => message.toolUses)
-    .map((tool) => toolPreview(tool, limit))
-    .join('; ');
-  const results = messages.flatMap((message) => message.toolResults ?? []);
-  const resultChars = results.reduce((sum, result) => sum + result.text.length, 0);
-  const resultText = truncate(results.map((result) => result.text).join('\n'), limit);
-  const text = truncate(
-    messages
-      .map((message) => message.text)
-      .filter(Boolean)
-      .join('\n'),
-    limit,
-  );
-  const chars = messages.reduce((sum, message) => sum + messageChars(message), 0);
-  return `role=${roles}; chars=${chars}; tools=${tools || '(none)'}; text=${text}${
-    results.length > 0 ? `; tool_result(${resultChars} chars)=${resultText}` : ''
-  }`;
-}
-
-function hasToolOutput(messages: readonly SessionMessage[]): boolean {
-  return messages.some((message) => (message.toolResults ?? []).length > 0);
-}
-
-export function groupMessages(
+export function collectToolCalls(
   messages: readonly SessionMessage[],
-  options: Pick<ModConfig, 'preserveRecentMessages' | 'previewChars'> = {},
-): CompactionUnit[] {
-  const preserveRecentMessages = Math.max(
-    0,
-    Math.floor(
-      options.preserveRecentMessages ?? DEFAULTS.preserveRecentMessages,
-    ),
-  );
-  const previewChars = Math.max(
-    1,
-    Math.floor(options.previewChars ?? DEFAULTS.previewChars),
-  );
-  const recentStart = Math.max(0, messages.length - preserveRecentMessages);
-  const units: CompactionUnit[] = [];
-
-  for (let index = 0; index < messages.length; index += 1) {
-    const message = messages[index];
-    if (!message) continue;
-    const next = messages[index + 1];
-    const paired =
-      message.role === 'assistant' &&
-      next?.role === 'user' &&
-      hasMatchingToolResult(message, next);
-    const grouped = paired ? [message, next] : [message];
-    const end = index + grouped.length - 1;
-    units.push({
-      id: `unit-${index}`,
-      messages: grouped,
-      pinned: index === 0 || end >= recentStart,
-      toolOutput: hasToolOutput(grouped),
-      preview: unitPreview(grouped, previewChars),
-    });
-    index = end;
-  }
-  return units;
-}
-
-export function packWindows(
-  units: readonly CompactionUnit[],
-  maxWindowChars: number,
-): CompactionUnit[][] {
-  const windows: CompactionUnit[][] = [];
-  let current: CompactionUnit[] = [];
-  let currentChars = 0;
-  for (const unit of units) {
-    const size = unit.preview.length;
-    if (current.length > 0 && currentChars + size > maxWindowChars) {
-      windows.push(current);
-      current = [];
-      currentChars = 0;
+  preserveRecentMessages: number,
+): ToolCall[] {
+  const results = new Map<string, { index: number; result: ToolResultSummary }>();
+  messages.forEach((message, index) => {
+    for (const result of message.toolResults ?? []) {
+      results.set(result.tool_use_id, { index, result });
     }
-    current.push(unit);
-    currentChars += size;
-  }
-  if (current.length > 0) windows.push(current);
-  return windows;
-}
-
-export function decideUnit(
-  unit: Pick<CompactionUnit, 'id' | 'pinned'> & Partial<Pick<CompactionUnit, 'toolOutput'>>,
-  answer: { drop: number; kind: Kind; kindConfidence: number },
-  config: Pick<
-    ResolvedConfig,
-    'dropThreshold' | 'toolOutputDropThreshold' | 'minKindConfidence' | 'protectedKinds'
-  >,
-): UnitDecision {
-  if (unit.pinned) {
-    return {
-      id: unit.id,
-      drop: 0,
-      kind: 'other',
-      kindConfidence: 0,
-      action: 'keep',
-      reason: 'pinned',
-    };
-  }
-  const decision: UnitDecision = {
-    id: unit.id,
-    drop: answer.drop,
-    kind: answer.kind,
-    kindConfidence: answer.kindConfidence,
-    action: 'keep',
-    reason: 'below_threshold',
-  };
-  if (
-    config.protectedKinds.has(answer.kind) &&
-    answer.kindConfidence >= config.minKindConfidence
-  ) {
-    decision.reason = 'protected_kind';
-  } else if (
-    answer.drop <
-    (unit.toolOutput ? config.toolOutputDropThreshold : config.dropThreshold)
-  ) {
-    decision.reason = 'below_threshold';
-  } else if (answer.kindConfidence < config.minKindConfidence) {
-    decision.reason = 'low_confidence';
-  } else {
-    decision.action = 'drop';
-    decision.reason = 'dropped';
-  }
-  return decision;
-}
-
-function messageChars(message: SessionMessage): number {
-  let total = message.text.length;
-  for (const tool of message.toolUses) {
-    total += tool.tool.length;
-    try {
-      total += JSON.stringify(tool.input).length;
-    } catch {
-      total += 20;
+  });
+  const calls: ToolCall[] = [];
+  messages.forEach((message, callIndex) => {
+    for (const tool of message.toolUses) {
+      const found = results.get(tool.tool_use_id);
+      if (!found) continue;
+      calls.push({
+        id: `t${calls.length + 1}`,
+        tool_use_id: tool.tool_use_id,
+        tool: tool.tool,
+        input: tool.input,
+        callIndex,
+        resultIndex: found.index,
+        resultChars: found.result.text.length,
+        isError: found.result.isError,
+        pinned:
+          isPinned(callIndex, messages.length, preserveRecentMessages) ||
+          isPinned(found.index, messages.length, preserveRecentMessages),
+      });
     }
-    total += tool.text?.length ?? 0;
+  });
+  return calls;
+}
+
+function inputText(input: Record<string, unknown>, limit: number): string {
+  let json = '';
+  try {
+    json = JSON.stringify(input);
+  } catch {
+    json = '[unserializable input]';
   }
-  for (const result of message.toolResults ?? []) {
-    total += result.text.length + result.tool_use_id.length;
+  return truncate(json, limit);
+}
+
+function resultNote(call: ToolCall): string {
+  return `${call.isError ? 'error' : 'ok'}, ${call.resultChars} chars (omitted)`;
+}
+
+function historyEntries(
+  messages: readonly SessionMessage[],
+  calls: readonly ToolCall[],
+  inputChars: number,
+): HistoryEntry[] {
+  const byMessage = new Map<number, ToolCall[]>();
+  for (const call of calls) {
+    const list = byMessage.get(call.callIndex) ?? [];
+    list.push(call);
+    byMessage.set(call.callIndex, list);
   }
-  return total;
+  const entries: HistoryEntry[] = [];
+  messages.forEach((message, i) => {
+    const toolCalls = (byMessage.get(i) ?? []).map((call) => ({
+      id: call.id,
+      tool: call.tool,
+      input: inputText(call.input, inputChars),
+      result: resultNote(call),
+    }));
+    if (message.text.trim().length === 0 && toolCalls.length === 0) return;
+    const entry: HistoryEntry = { i, role: message.role, text: message.text };
+    if (toolCalls.length > 0) entry.tool_calls = toolCalls;
+    entries.push(entry);
+  });
+  return entries;
 }
 
 function goalFromMessages(messages: readonly SessionMessage[]): string {
@@ -393,113 +291,287 @@ function goalFromMessages(messages: readonly SessionMessage[]): string {
       (message) =>
         message.role === 'user' &&
         message.text.trim().length > 0 &&
-        (!message.toolResults || message.toolResults.length === 0),
+        (message.toolResults ?? []).length === 0,
     )
     .slice(-3)
     .map((message) => truncate(message.text, 500))
     .join('\n');
 }
 
-function questionsFor(units: readonly CompactionUnit[]): Record<string, unknown> {
-  return Object.fromEntries(
-    units.flatMap((unit) => [
-      [
-        `drop_${unit.id}`,
-        {
-          type: 'noul',
-          instructions: `Unit ${unit.id} can be removed from the conversation without losing information the assistant needs to continue the current task. Tool results the assistant already acted on (file contents, listings, test output) can be re-read or re-run and are safe to remove; the user's instructions, constraints, decisions, errors and pending tasks must stay.`,
-        },
-      ],
-      [
-        `kind_${unit.id}`,
-        {
-          type: 'choice',
-          instructions: `What kind of information is in unit ${unit.id}?`,
-          criteria: KIND_CRITERIA,
-        },
-      ],
-    ]),
+export type FittedState = {
+  state: JevState;
+  tokens: number;
+  stage: string;
+};
+
+/**
+ * Builds the Jev state from the whole conversation and shrinks it in stages
+ * until it fits `maxStateTokens`: tool inputs are truncated, then long texts
+ * are abridged oldest-first (pinned messages last), then old messages collapse
+ * to a one-line note. Throws when even that is too big.
+ */
+export function fitState(
+  messages: readonly SessionMessage[],
+  calls: readonly ToolCall[],
+  config: Pick<
+    ResolvedConfig,
+    'maxStateTokens' | 'charsPerToken' | 'preserveRecentMessages' | 'goal'
+  >,
+): FittedState {
+  const goal = config.goal || goalFromMessages(messages);
+  const measure = (history: HistoryEntry[]): [JevState, number] => {
+    const state: JevState = { context: CONTEXT, goal, history };
+    return [state, estimateTokens(JSON.stringify(state), config.charsPerToken)];
+  };
+  const fits = (tokens: number): boolean => tokens <= config.maxStateTokens;
+
+  let history = historyEntries(messages, calls, INPUT_CHARS[0] ?? 1000);
+  let [state, tokens] = measure(history);
+  if (fits(tokens)) return { state, tokens, stage: 'full' };
+
+  for (const limit of INPUT_CHARS.slice(1)) {
+    history = historyEntries(messages, calls, limit);
+    [state, tokens] = measure(history);
+    if (fits(tokens)) return { state, tokens, stage: `inputs<=${limit}` };
+  }
+
+  const pinned = (entry: HistoryEntry): boolean =>
+    isPinned(entry.i, messages.length, config.preserveRecentMessages);
+  const order = [
+    ...history.filter((entry) => !pinned(entry)),
+    ...history.filter(pinned),
+  ];
+
+  for (const entry of order) {
+    if (entry.text.length <= TEXT_HEAD + TEXT_TAIL + 40) continue;
+    entry.text = abridge(entry.text, TEXT_HEAD, TEXT_TAIL);
+    [state, tokens] = measure(history);
+    if (fits(tokens)) return { state, tokens, stage: 'texts abridged' };
+  }
+
+  for (const entry of order) {
+    if (pinned(entry) || entry.text.length === 0) continue;
+    entry.text = `[… ${entry.text.length} chars omitted …]`;
+    [state, tokens] = measure(history);
+    if (fits(tokens)) return { state, tokens, stage: 'old messages collapsed' };
+  }
+
+  throw new Error(
+    `history too large for Jev (~${tokens} tokens after truncation, limit ${config.maxStateTokens})`,
   );
 }
 
-function answerFor(
-  answers: Record<string, JevAnswer>,
-  unit: CompactionUnit,
-): { drop: number; kind: Kind; kindConfidence: number } {
-  const dropAnswer = answers[`drop_${unit.id}`];
-  const kindAnswer = answers[`kind_${unit.id}`];
-  if (
-    !dropAnswer ||
-    !('noul' in dropAnswer) ||
-    typeof dropAnswer.noul !== 'number' ||
-    !kindAnswer ||
-    !('choice' in kindAnswer) ||
-    typeof kindAnswer.choice !== 'string' ||
-    !(kindAnswer.choice in KIND_CRITERIA) ||
-    typeof kindAnswer.confidence !== 'number'
-  ) {
-    throw new Error(`Invalid Jev answers for ${unit.id}`);
-  }
+function questionsFor(call: ToolCall): Record<string, unknown> {
   return {
-    drop: dropAnswer.noul,
-    kind: kindAnswer.choice as Kind,
-    kindConfidence: kindAnswer.confidence,
+    [`call_${call.id}`]: {
+      type: 'noul',
+      instructions: `Tool call ${call.id} (${call.tool}) should stay in the history: knowing this call was made, with its input, still matters for what the assistant does next`,
+    },
+    [`result_${call.id}`]: {
+      type: 'noul',
+      instructions: `The full output of tool call ${call.id} (${call.tool}, ${call.resultChars} chars) should stay in the history verbatim: the assistant still needs its contents and re-running the tool would not do`,
+    },
   };
 }
 
-async function askWindow(
-  window: readonly CompactionUnit[],
-  goal: string,
+/**
+ * Splits the candidate calls into batches whose questions, together with the
+ * (always complete) state, fit one request.
+ */
+export function batchCalls(
+  calls: readonly ToolCall[],
+  stateTokens: number,
+  config: Pick<ResolvedConfig, 'maxRequestTokens' | 'charsPerToken'>,
+): ToolCall[][] {
+  const budget = config.maxRequestTokens - stateTokens;
+  const batches: ToolCall[][] = [];
+  let current: ToolCall[] = [];
+  let currentTokens = 0;
+  for (const call of calls) {
+    const tokens = estimateTokens(
+      JSON.stringify(questionsFor(call)),
+      config.charsPerToken,
+    );
+    if (current.length > 0 && currentTokens + tokens > budget) {
+      batches.push(current);
+      current = [];
+      currentTokens = 0;
+    }
+    if (current.length === 0 && tokens > budget) {
+      throw new Error(
+        `state leaves no room for questions (~${stateTokens} of ${config.maxRequestTokens} tokens)`,
+      );
+    }
+    current.push(call);
+    currentTokens += tokens;
+  }
+  if (current.length > 0) batches.push(current);
+  return batches;
+}
+
+export function decideCall(
+  call: Pick<ToolCall, 'id' | 'tool' | 'pinned'>,
+  answer: CallAnswer,
+  config: Pick<ResolvedConfig, 'keepThreshold'>,
+): CallDecision {
+  const base = { id: call.id, tool: call.tool, ...answer };
+  if (call.pinned) {
+    return { ...base, action: 'keep', reason: 'pinned' };
+  }
+  if (answer.keepResult >= config.keepThreshold) {
+    return { ...base, action: 'keep', reason: 'kept' };
+  }
+  if (answer.keepCall >= config.keepThreshold) {
+    return { ...base, action: 'drop_result', reason: 'result_dropped' };
+  }
+  return { ...base, action: 'drop_call', reason: 'call_dropped' };
+}
+
+function noul(answers: Record<string, JevAnswer>, name: string): number {
+  const answer = answers[name];
+  if (!answer || typeof answer.noul !== 'number') {
+    throw new Error(`Invalid Jev answer for ${name}`);
+  }
+  return answer.noul;
+}
+
+async function askBatch(
+  batch: readonly ToolCall[],
+  state: JevState,
   config: ResolvedConfig,
   fetchFn: HookFetch,
-): Promise<Map<string, UnitDecision>> {
+): Promise<Map<string, CallAnswer>> {
   if (!config.apiKey) throw new Error('TYPESAFE_API_KEY is not configured');
+  const questions = Object.assign({}, ...batch.map(questionsFor)) as Record<
+    string,
+    unknown
+  >;
   const response = await fetchFn(SYSTEM_ONE_URL, {
     method: 'POST',
     headers: {
       authorization: `Bearer ${config.apiKey}`,
       'content-type': 'application/json',
     },
-    body: JSON.stringify({
-      model: config.model,
-      state: {
-        goal,
-        window: window.map((unit) => ({
-          id: unit.id,
-          role: unit.messages.map((message) => message.role).join('+'),
-          preview: unit.preview,
-        })),
-      },
-      questions: questionsFor(window),
-    }),
+    body: JSON.stringify({ model: config.model, state, questions }),
   });
   if (!response.ok) {
-    throw new Error(`TypeSafe request failed with HTTP ${response.status}`);
+    throw new Error(`TypeSafe request failed with ${response.status}`);
   }
-  const parsed = JSON.parse(response.text) as JevResponse;
-  if (!parsed.answers) throw new Error('TypeSafe response has no answers');
+  let parsed: JevResponse;
+  try {
+    parsed = JSON.parse(response.text) as JevResponse;
+  } catch {
+    throw new Error('TypeSafe returned malformed JSON');
+  }
+  const answers = parsed.answers;
+  if (!answers) throw new Error('TypeSafe response is missing answers');
   return new Map(
-    window.map((unit) => {
-      const answer = answerFor(parsed.answers as Record<string, JevAnswer>, unit);
-      return [
-        unit.id,
-        decideUnit(unit, answer, {
-          dropThreshold: config.dropThreshold,
-          toolOutputDropThreshold: config.toolOutputDropThreshold,
-          minKindConfidence: config.minKindConfidence,
-          protectedKinds: config.protectedKinds,
-        }),
-      ];
-    }),
+    batch.map((call) => [
+      call.id,
+      {
+        keepCall: noul(answers, `call_${call.id}`),
+        keepResult: noul(answers, `result_${call.id}`),
+      },
+    ]),
   );
 }
 
-export type CompactionOutput = {
-  messages: SessionMessage[];
-  decisions: UnitDecision[];
-  charsBefore: number;
-  charsAfter: number;
-};
+function removedNote(result: ToolResultSummary): string {
+  return `[tool result removed during compaction: ${result.text.length} chars${
+    result.isError ? ', error' : ''
+  }; re-run the tool if needed]`;
+}
+
+function strippedToolUse(tool: ToolUseSummary, note: string): ToolUseSummary {
+  const copy: ToolUseSummary = {
+    tool_use_id: tool.tool_use_id,
+    tool: tool.tool,
+    input: tool.input,
+    text: note,
+  };
+  if (tool.isError) copy.isError = true;
+  return copy;
+}
+
+/**
+ * Rebuilds the conversation from the decisions. A dropped call disappears
+ * together with its result; a dropped result is replaced by a one-line note.
+ * Messages that lose all their content are removed; untouched messages keep
+ * the engine's handle.
+ */
+export function applyDecisions(
+  messages: readonly SessionMessage[],
+  decisions: readonly CallDecision[],
+  calls: readonly ToolCall[],
+): SessionMessage[] {
+  const actionById = new Map<string, CallDecision['action']>();
+  for (const decision of decisions) {
+    const call = calls.find((candidate) => candidate.id === decision.id);
+    if (call && decision.action !== 'keep') {
+      actionById.set(call.tool_use_id, decision.action);
+    }
+  }
+  const kept: SessionMessage[] = [];
+  for (const message of messages) {
+    const touchedUses = message.toolUses.some((tool) => actionById.has(tool.tool_use_id));
+    const touchedResults = (message.toolResults ?? []).some((result) =>
+      actionById.has(result.tool_use_id),
+    );
+    if (!touchedUses && !touchedResults) {
+      kept.push(message);
+      continue;
+    }
+    const toolUses = message.toolUses
+      .filter((tool) => actionById.get(tool.tool_use_id) !== 'drop_call')
+      .map((tool) =>
+        actionById.get(tool.tool_use_id) === 'drop_result'
+          ? strippedToolUse(
+              tool,
+              `[tool result removed during compaction: ${tool.text?.length ?? 0} chars; re-run the tool if needed]`,
+            )
+          : tool,
+      );
+    const toolResults = (message.toolResults ?? [])
+      .filter((result) => actionById.get(result.tool_use_id) !== 'drop_call')
+      .map((result) =>
+        actionById.get(result.tool_use_id) === 'drop_result'
+          ? {
+              tool_use_id: result.tool_use_id,
+              text: removedNote(result),
+              isError: result.isError,
+            }
+          : result,
+      );
+    if (message.text.trim().length === 0 && toolUses.length === 0 && toolResults.length === 0) {
+      continue;
+    }
+    const rebuilt: SessionMessage = { role: message.role, text: message.text, toolUses };
+    if (toolResults.length > 0) rebuilt.toolResults = toolResults;
+    kept.push(rebuilt);
+  }
+  return kept;
+}
+
+export function messageChars(message: SessionMessage): number {
+  let total = message.text.length;
+  for (const tool of message.toolUses) {
+    try {
+      total += JSON.stringify(tool.input).length;
+    } catch {
+      total += 20;
+    }
+  }
+  for (const result of message.toolResults ?? []) {
+    total += result.text.length;
+  }
+  return total;
+}
+
+export function reductionRatio(result: CompactionOutput): number {
+  return result.charsBefore === 0
+    ? 0
+    : (result.charsBefore - result.charsAfter) / result.charsBefore;
+}
 
 export async function compactWithFetch(
   messages: readonly SessionMessage[],
@@ -507,42 +579,42 @@ export async function compactWithFetch(
   fetchFn: HookFetch,
 ): Promise<CompactionOutput> {
   const config = resolveConfig(options);
-  const units = groupMessages(messages, config);
-  const candidates = units.filter((unit) => !unit.pinned);
+  const calls = collectToolCalls(messages, config.preserveRecentMessages);
+  const candidates = calls.filter((call) => !call.pinned);
+  const charsBefore = messages.reduce((sum, message) => sum + messageChars(message), 0);
   if (candidates.length === 0) {
     return {
       messages: [...messages],
-      decisions: units.map((unit) =>
-        decideUnit(unit, { drop: 0, kind: 'other', kindConfidence: 0 }, config),
+      decisions: calls.map((call) =>
+        decideCall(call, { keepCall: 1, keepResult: 1 }, config),
       ),
-      charsBefore: messages.reduce((sum, message) => sum + messageChars(message), 0),
-      charsAfter: messages.reduce((sum, message) => sum + messageChars(message), 0),
+      charsBefore,
+      charsAfter: charsBefore,
+      stateTokens: 0,
+      requests: 0,
     };
   }
-  const windows = packWindows(candidates, config.maxWindowChars);
-  const results = await Promise.all(
-    windows.map((window) => askWindow(window, goalFromMessages(messages), config, fetchFn)),
+  const fitted = fitState(messages, calls, config);
+  const batches = batchCalls(candidates, fitted.tokens, config);
+  const answered = await Promise.all(
+    batches.map((batch) => askBatch(batch, fitted.state, config, fetchFn)),
   );
-  const byId = new Map(results.flatMap((result) => [...result.entries()]));
-  const decisions = units.map((unit) => {
-    const decision = byId.get(unit.id);
-    return (
-      decision ??
-      decideUnit(unit, { drop: 0, kind: 'other', kindConfidence: 0 }, config)
-    );
-  });
-  const dropped = new Set(
-    decisions
-      .filter((decision) => decision.action === 'drop')
-      .map((decision) => decision.id),
+  const answers = new Map(answered.flatMap((map) => [...map.entries()]));
+  const decisions = calls.map((call) =>
+    decideCall(
+      call,
+      answers.get(call.id) ?? { keepCall: 1, keepResult: 1 },
+      config,
+    ),
   );
-  const keptUnits = units.filter((unit) => !dropped.has(unit.id));
-  const kept = keptUnits.flatMap((unit) => unit.messages);
+  const kept = applyDecisions(messages, decisions, calls);
   return {
     messages: kept,
     decisions,
-    charsBefore: messages.reduce((sum, message) => sum + messageChars(message), 0),
+    charsBefore,
     charsAfter: kept.reduce((sum, message) => sum + messageChars(message), 0),
+    stateTokens: fitted.tokens,
+    requests: batches.length,
   };
 }
 
@@ -552,51 +624,49 @@ export async function compactOrFallback(
   fetchFn: HookFetch,
 ): Promise<CompactionOutput | null> {
   const result = await compactWithFetch(messages, options, fetchFn);
-  const reduction =
-    result.charsBefore === 0
-      ? 0
-      : (result.charsBefore - result.charsAfter) / result.charsBefore;
-  return reduction < (options.minReductionRatio ?? DEFAULTS.minReductionRatio)
+  return reductionRatio(result) <
+    (options.minReductionRatio ?? DEFAULTS.minReductionRatio)
     ? null
     : result;
 }
 
+function percent(ratio: number): string {
+  return `${Math.round(ratio * 100)}%`;
+}
+
+function summarize(result: CompactionOutput): string {
+  const counts = new Map<CallDecision['reason'], number>();
+  for (const decision of result.decisions) {
+    counts.set(decision.reason, (counts.get(decision.reason) ?? 0) + 1);
+  }
+  const parts = [...counts.entries()].map(([reason, count]) => `${count} ${reason}`);
+  return `${percent(reductionRatio(result))} reduction; ${
+    parts.join(', ') || 'no tool calls'
+  }; state ~${result.stateTokens} tokens in ${result.requests} request(s)`;
+}
+
+function decisionLog(result: CompactionOutput): string {
+  return result.decisions
+    .filter((d) => d.reason !== 'pinned')
+    .map(
+      (d) =>
+        `${d.id}:${d.tool}:${d.action}/call=${d.keepCall.toFixed(2)}/result=${d.keepResult.toFixed(2)}`,
+    )
+    .join(' ');
+}
+
 function optionConfig(options: PluginOptions): ModConfig {
+  const resolved = resolveConfig(options);
   return {
-    apiKey: typeof options.apiKey === 'string' && options.apiKey.length > 0 ? options.apiKey : undefined,
-    dropThreshold: optionNumber(options, 'dropThreshold', DEFAULTS.dropThreshold),
-    toolOutputDropThreshold: optionNumber(
-      options,
-      'toolOutputDropThreshold',
-      DEFAULTS.toolOutputDropThreshold,
-    ),
-    minKindConfidence: optionNumber(
-      options,
-      'minKindConfidence',
-      DEFAULTS.minKindConfidence,
-    ),
-    preserveRecentMessages: optionNumber(
-      options,
-      'preserveRecentMessages',
-      DEFAULTS.preserveRecentMessages,
-    ),
-    compactAtPercent: optionNumber(
-      options,
-      'compactAtPercent',
-      DEFAULTS.compactAtPercent,
-    ),
-    minReductionRatio: optionNumber(
-      options,
-      'minReductionRatio',
-      DEFAULTS.minReductionRatio,
-    ),
-    maxWindowChars: optionNumber(
-      options,
-      'maxWindowChars',
-      DEFAULTS.maxWindowChars,
-    ),
-    previewChars: optionNumber(options, 'previewChars', DEFAULTS.previewChars),
-    model: optionString(options, 'model', DEFAULTS.model),
+    apiKey: resolved.apiKey,
+    keepThreshold: resolved.keepThreshold,
+    preserveRecentMessages: resolved.preserveRecentMessages,
+    compactAtPercent: resolved.compactAtPercent,
+    minReductionRatio: resolved.minReductionRatio,
+    maxStateTokens: resolved.maxStateTokens,
+    maxRequestTokens: resolved.maxRequestTokens,
+    charsPerToken: resolved.charsPerToken,
+    model: resolved.model,
   };
 }
 
@@ -620,7 +690,12 @@ async function getApiKey(
 }
 
 function notify(
-  $: { ui: { log: (text: string) => void; toast: (text: string, options?: { timeoutMs?: number }) => void } },
+  $: {
+    ui: {
+      log: (text: string) => void;
+      toast: (text: string, options?: { timeoutMs?: number }) => void;
+    };
+  },
   text: string,
 ): void {
   $.ui.log(text);
@@ -635,36 +710,22 @@ export const register: Register = (on: On, options: PluginOptions) => {
     try {
       const apiKey = await getApiKey($, configured);
       const config = { ...configured, apiKey };
-      const result = await compactWithFetch(
-        event.messages,
-        config,
-        async (url, init) => {
-          const response = await $.http.fetch(url, init);
-          return {
-            status: response.status,
-            ok: response.ok,
-            text: response.text,
-          };
-        },
-      );
-      const dropped = result.decisions.filter((d) => d.action === 'drop').length;
-      const pct = result.charsBefore === 0 ? 0 : Math.round((1 - result.charsAfter / result.charsBefore) * 100);
-      $.ui.log(
-        `decisions: ${result.decisions
-          .map((d) => `${d.id}:${d.action[0]}/${d.reason}/${d.kind}/drop=${d.drop.toFixed(2)}`)
-          .join(' ')}`,
-      );
-      const reduction = result.charsBefore === 0 ? 0 : (result.charsBefore - result.charsAfter) / result.charsBefore;
-      if (reduction < (config.minReductionRatio ?? DEFAULTS.minReductionRatio)) {
+      const result = await compactWithFetch(event.messages, config, async (url, init) => {
+        const response = await $.http.fetch(url, init);
+        return { status: response.status, ok: response.ok, text: response.text };
+      });
+      $.ui.log(`decisions: ${decisionLog(result) || '(none)'}`);
+      const minReduction = config.minReductionRatio ?? DEFAULTS.minReductionRatio;
+      if (reductionRatio(result) < minReduction) {
         notify(
           $,
-          `fallback to built-in summary (dropped ${dropped}/${result.decisions.length} units, -${pct}% chars, below minimum)`,
+          `fallback to built-in summary (below ${percent(minReduction)} minimum: ${summarize(result)})`,
         );
         return next(event);
       }
       notify(
         $,
-        `kept ${result.messages.length}/${event.messages.length} messages verbatim, dropped ${dropped} units (-${pct}% chars, no summary)`,
+        `kept ${result.messages.length}/${event.messages.length} messages, no summary (${summarize(result)})`,
       );
       return { messages: result.messages };
     } catch (error) {

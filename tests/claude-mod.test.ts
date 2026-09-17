@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
+  applyDecisions,
+  batchCalls,
+  collectToolCalls,
   compactOrFallback,
-  decideUnit,
-  groupMessages,
-  packWindows,
-  type CompactionUnit,
+  compactWithFetch,
+  decideCall,
+  fitState,
+  type ToolCall,
 } from '../plugin/hooks/fast-jev.ts';
 
 type Message = {
@@ -14,12 +17,14 @@ type Message = {
     tool_use_id: string;
     tool: string;
     input: Record<string, unknown>;
+    text?: string;
   }>;
   toolResults?: Array<{
     tool_use_id: string;
     text: string;
     isError: boolean;
   }>;
+  handle?: string;
 };
 
 function message(
@@ -30,121 +35,290 @@ function message(
   return { role, text, toolUses: [], ...extra };
 }
 
-function units(...previews: string[]): CompactionUnit[] {
-  return previews.map((preview, index) => ({
-    id: `unit-${index}`,
-    messages: [message('user', preview)],
-    pinned: false,
-    preview,
-  }));
+function call(id: string, tool: string, input: Record<string, unknown>, text: string): Message {
+  return message('assistant', '', {
+    toolUses: [{ tool_use_id: id, tool, input, text }],
+    handle: `h-${id}`,
+  });
 }
 
-describe('Claude Code mod pure logic', () => {
-  it('groups an assistant tool call with its following tool result', () => {
-    const grouped = groupMessages([
-      message('user', 'start'),
-      message('assistant', '', {
-        toolUses: [
-          { tool_use_id: 'tool-1', tool: 'Read', input: { file: 'a.ts' } },
-        ],
-      }),
-      message('user', '', {
-        toolResults: [
-          { tool_use_id: 'tool-1', text: 'contents', isError: false },
-        ],
-      }),
-      message('assistant', 'done'),
-    ], { preserveRecentMessages: 0 });
-
-    expect(grouped).toHaveLength(3);
-    expect(grouped[1]?.messages).toHaveLength(2);
-    expect(grouped[1]?.messages[0]?.role).toBe('assistant');
-    expect(grouped[1]?.messages[1]?.toolResults?.[0]?.tool_use_id).toBe('tool-1');
+function result(id: string, text: string, isError = false): Message {
+  return message('user', '', {
+    toolResults: [{ tool_use_id: id, text, isError }],
+    handle: `r-${id}`,
   });
+}
 
-  it('pins the first unit and newest messages', () => {
-    const grouped = groupMessages(
-      [
-        message('user', 'first'),
-        message('assistant', 'old'),
-        message('user', 'new'),
-      ],
-      { preserveRecentMessages: 1 },
-    );
+const fileA = 'export const a = 1;\n'.repeat(50);
+const fileB = 'export const b = 2;\n'.repeat(50);
 
-    expect(grouped.map((unit) => unit.pinned)).toEqual([true, false, true]);
-  });
+function transcript(): Message[] {
+  return [
+    message('user', 'Never edit anything under src/generated. Fix the failing test.'),
+    call('tool-1', 'Read', { file_path: 'src/a.ts' }, fileA),
+    result('tool-1', fileA),
+    message('assistant', 'a.ts looks fine; checking b.ts'),
+    call('tool-2', 'Read', { file_path: 'src/b.ts' }, fileB),
+    result('tool-2', fileB),
+    call('tool-3', 'Bash', { command: 'npm test' }, 'FAIL b.test.ts'),
+    result('tool-3', 'FAIL b.test.ts: expected 2 to be 3', true),
+    message('assistant', 'The failure is in b.test.ts; fixing now.'),
+    message('user', 'go ahead'),
+  ];
+}
 
-  it('packs windows without exceeding the character budget after the first unit', () => {
-    const packed = packWindows(units('1234', '5678', '90'), 8);
-    expect(packed.map((window) => window.map((unit) => unit.preview))).toEqual([
-      ['1234', '5678'],
-      ['90'],
-    ]);
-  });
-
-  it('applies the requested decision matrix', () => {
-    const config = {
-      dropThreshold: 0.8,
-      minKindConfidence: 0.5,
-      protectedKinds: new Set(['user_instruction' as const]),
+function jevFetch(
+  answer: (name: string) => number,
+  seen: Array<{ state: unknown; questions: string[] }> = [],
+) {
+  return async (_url: string, init?: { body?: string }) => {
+    const body = JSON.parse(init?.body ?? '{}') as {
+      state: unknown;
+      questions: Record<string, unknown>;
     };
-    const unit = { id: 'unit-1', pinned: false };
-    expect(decideUnit(unit, {
-      drop: 0.99,
-      kind: 'user_instruction',
-      kindConfidence: 0.9,
-    }, config).reason).toBe('protected_kind');
-    expect(decideUnit(unit, {
-      drop: 0.2,
-      kind: 'other',
-      kindConfidence: 0.9,
-    }, config).reason).toBe('below_threshold');
-    expect(decideUnit(unit, {
-      drop: 0.9,
-      kind: 'other',
-      kindConfidence: 0.2,
-    }, config).reason).toBe('low_confidence');
-    expect(decideUnit(unit, {
-      drop: 0.9,
-      kind: 'other',
-      kindConfidence: 0.9,
-    }, config).action).toBe('drop');
-    expect(decideUnit({ id: 'unit-0', pinned: true }, {
-      drop: 1,
-      kind: 'other',
-      kindConfidence: 1,
-    }, config).reason).toBe('pinned');
+    seen.push({ state: body.state, questions: Object.keys(body.questions) });
+    const answers = Object.fromEntries(
+      Object.keys(body.questions).map((key) => [key, { type: 'noul', noul: answer(key) }]),
+    );
+    return { status: 200, ok: true, text: JSON.stringify({ answers }) };
+  };
+}
+
+const fit = {
+  maxStateTokens: 25_000,
+  charsPerToken: 3.5,
+  preserveRecentMessages: 0,
+  goal: 'fix the test',
+};
+
+describe('tool call collection', () => {
+  it('pairs each tool call with its result and pins recent ones', () => {
+    const calls = collectToolCalls(transcript(), 3);
+    expect(calls.map((c) => [c.id, c.tool, c.callIndex, c.resultIndex, c.pinned])).toEqual([
+      ['t1', 'Read', 1, 2, false],
+      ['t2', 'Read', 4, 5, false],
+      ['t3', 'Bash', 6, 7, true],
+    ]);
+    expect(calls[2]?.isError).toBe(true);
+    expect(calls[0]?.resultChars).toBe(fileA.length);
   });
 
-  it('falls back when the estimated reduction is too small', async () => {
+  it('ignores calls without a result', () => {
+    const calls = collectToolCalls([message('user', 'hi'), call('x', 'Read', {}, '')], 0);
+    expect(calls).toHaveLength(0);
+  });
+});
+
+describe('state fitting', () => {
+  it('sends the whole history with tool results replaced by a note', () => {
+    const messages = transcript();
+    const { state, stage } = fitState(messages, collectToolCalls(messages, 0), fit);
+    expect(stage).toBe('full');
+    const json = JSON.stringify(state);
+    expect(json).not.toContain('export const a = 1;');
+    expect(json).toContain('Never edit anything under src/generated');
+    expect(json).toContain('go ahead');
+    expect(state.history.map((entry) => entry.i)).toEqual([0, 1, 3, 4, 6, 8, 9]);
+    expect(state.history[1]?.tool_calls?.[0]).toMatchObject({
+      id: 't1',
+      tool: 'Read',
+      result: `ok, ${fileA.length} chars (omitted)`,
+    });
+    expect(state.history[4]?.tool_calls?.[0]?.result).toMatch(/^error, /);
+  });
+
+  it('truncates tool inputs before touching message text', () => {
     const messages = [
-      message('user', 'pinned context'),
-      message('assistant', 'small candidate'),
+      message('user', 'start'),
+      call('w', 'Write', { file_path: 'x.ts', content: 'x'.repeat(5000) }, 'ok'),
+      result('w', 'ok'),
+      message('assistant', 'written'),
     ];
-    const fallback = await compactOrFallback(
+    const { state, stage, tokens } = fitState(messages, collectToolCalls(messages, 0), {
+      ...fit,
+      maxStateTokens: 300,
+    });
+    expect(stage).toBe('inputs<=200');
+    expect(tokens).toBeLessThanOrEqual(300);
+    expect(state.history[0]?.text).toBe('start');
+    expect(state.history[1]?.tool_calls?.[0]?.input.length).toBeLessThanOrEqual(200);
+  });
+
+  it('abridges long texts oldest-first and collapses old messages last', () => {
+    const long = (n: number) => `${n} ` + 'lorem ipsum '.repeat(300);
+    const messages = [
+      message('user', long(0)),
+      message('assistant', long(1)),
+      message('user', long(2)),
+      message('assistant', long(3)),
+      message('user', 'latest'),
+    ];
+    const abridged = fitState(messages, [], { ...fit, maxStateTokens: 1800, preserveRecentMessages: 1 });
+    expect(abridged.stage).toBe('texts abridged');
+    expect(abridged.tokens).toBeLessThanOrEqual(1800);
+    expect(abridged.state.history[1]?.text).toContain('chars omitted');
+    expect(abridged.state.history[0]?.text).toBe(long(0));
+    expect(abridged.state.history[4]?.text).toBe('latest');
+
+    const collapsed = fitState(messages, [], { ...fit, maxStateTokens: 420, preserveRecentMessages: 1 });
+    expect(collapsed.stage).toBe('old messages collapsed');
+    expect(collapsed.tokens).toBeLessThanOrEqual(420);
+    expect(collapsed.state.history[1]?.text).toMatch(/^\[… \d+ chars omitted …\]$/);
+    expect(collapsed.state.history[0]?.text).toContain('lorem');
+    expect(collapsed.state.history[4]?.text).toBe('latest');
+  });
+
+  it('throws when the history cannot be fitted', () => {
+    const messages = [message('user', 'a'.repeat(2000)), message('assistant', 'b')];
+    expect(() => fitState(messages, [], { ...fit, maxStateTokens: 50 })).toThrow(/too large/);
+  });
+});
+
+describe('question batching', () => {
+  const calls: ToolCall[] = Array.from({ length: 10 }, (_, i) => ({
+    id: `t${i + 1}`,
+    tool_use_id: `tool-${i + 1}`,
+    tool: 'Read',
+    input: {},
+    callIndex: i * 2 + 1,
+    resultIndex: i * 2 + 2,
+    resultChars: 100,
+    isError: false,
+    pinned: false,
+  }));
+
+  it('puts everything in one request when it fits', () => {
+    expect(batchCalls(calls, 1000, { maxRequestTokens: 30_000, charsPerToken: 3.5 })).toHaveLength(1);
+  });
+
+  it('splits questions across requests when the state leaves little room', () => {
+    const batches = batchCalls(calls, 29_600, { maxRequestTokens: 30_000, charsPerToken: 3.5 });
+    expect(batches.length).toBeGreaterThan(1);
+    expect(batches.flat().map((c) => c.id)).toEqual(calls.map((c) => c.id));
+  });
+
+  it('throws when a single question does not fit', () => {
+    expect(() => batchCalls(calls, 29_990, { maxRequestTokens: 30_000, charsPerToken: 3.5 })).toThrow(
+      /no room/,
+    );
+  });
+});
+
+describe('decisions', () => {
+  const config = { keepThreshold: 0.5 };
+  const unpinned = { id: 't1', tool: 'Read', pinned: false };
+
+  it('keeps, drops the result, or drops the call based on the keep probabilities', () => {
+    expect(decideCall(unpinned, { keepCall: 0.9, keepResult: 0.7 }, config).action).toBe('keep');
+    expect(decideCall(unpinned, { keepCall: 0.9, keepResult: 0.2 }, config).action).toBe('drop_result');
+    expect(decideCall(unpinned, { keepCall: 0.1, keepResult: 0.2 }, config).action).toBe('drop_call');
+    expect(decideCall({ ...unpinned, pinned: true }, { keepCall: 0, keepResult: 0 }, config)).toMatchObject({
+      action: 'keep',
+      reason: 'pinned',
+    });
+  });
+
+  it('removes dropped calls with their results and replaces dropped results with a note', () => {
+    const messages = transcript();
+    const calls = collectToolCalls(messages, 0);
+    const decisions = [
+      decideCall(calls[0]!, { keepCall: 0.1, keepResult: 0.1 }, config),
+      decideCall(calls[1]!, { keepCall: 0.9, keepResult: 0.1 }, config),
+      decideCall(calls[2]!, { keepCall: 0.9, keepResult: 0.9 }, config),
+    ];
+    const kept = applyDecisions(messages, decisions, calls);
+
+    expect(kept.map((m) => m.text || m.toolUses[0]?.tool_use_id || m.toolResults?.[0]?.tool_use_id)).toEqual([
+      'Never edit anything under src/generated. Fix the failing test.',
+      'a.ts looks fine; checking b.ts',
+      'tool-2',
+      'tool-2',
+      'tool-3',
+      'tool-3',
+      'The failure is in b.test.ts; fixing now.',
+      'go ahead',
+    ]);
+    expect(kept[2]?.toolUses[0]?.text).toMatch(/tool result removed/);
+    expect(kept[2]?.handle).toBeUndefined();
+    expect(kept[3]?.toolResults?.[0]?.text).toMatch(/^\[tool result removed during compaction: \d+ chars; re-run/);
+    expect(kept[4]?.handle).toBe('h-tool-3');
+    expect(kept[5]?.toolResults?.[0]?.text).toContain('expected 2 to be 3');
+  });
+});
+
+describe('end to end', () => {
+  it('resends the full state with every batch and merges the answers', async () => {
+    const seen: Array<{ state: unknown; questions: string[] }> = [];
+    const messages = transcript();
+    const stateTokens = fitState(messages, collectToolCalls(messages, 1), {
+      ...fit,
+      goal: '',
+      preserveRecentMessages: 1,
+    }).tokens;
+    const output = await compactWithFetch(
       messages,
       {
         apiKey: 'test-key',
-        preserveRecentMessages: 0,
-        minReductionRatio: 0.9,
+        preserveRecentMessages: 1,
+        maxStateTokens: 25_000,
+        maxRequestTokens: stateTokens + 150,
       },
-      async (_url, init) => {
-        const body = JSON.parse(init?.body ?? '{}') as {
-          questions: Record<string, { type: string }>;
-        };
-        const answers = Object.fromEntries(
-          Object.keys(body.questions).map((key) => [
-            key,
-            key.startsWith('drop_')
-              ? { type: 'noul', noul: 0.1 }
-              : { type: 'choice', choice: 'other', confidence: 0.9 },
-          ]),
-        );
-        return { status: 200, ok: true, text: JSON.stringify({ answers }) };
-      },
+      jevFetch((name) => (name.startsWith('call_') ? 0.9 : 0.1), seen),
     );
 
+    expect(output.requests).toBe(seen.length);
+    expect(seen.length).toBeGreaterThan(1);
+    expect(seen.flatMap((r) => r.questions).sort()).toEqual(
+      ['call_t1', 'call_t2', 'call_t3', 'result_t1', 'result_t2', 'result_t3'],
+    );
+    const states = new Set(seen.map((r) => JSON.stringify(r.state)));
+    expect(states.size).toBe(1);
+    expect(output.decisions.map((d) => d.action)).toEqual(['drop_result', 'drop_result', 'drop_result']);
+    expect(output.messages).toHaveLength(messages.length);
+    expect(output.charsAfter).toBeLessThan(output.charsBefore * 0.25);
+  });
+
+  it('keeps everything without calling Jev when no tool call is a candidate', async () => {
+    let called = 0;
+    const output = await compactWithFetch(
+      [message('user', 'hello'), message('assistant', 'hi')],
+      { apiKey: 'test-key' },
+      async () => {
+        called += 1;
+        return { status: 200, ok: true, text: '{}' };
+      },
+    );
+    expect(called).toBe(0);
+    expect(output.requests).toBe(0);
+    expect(output.messages).toHaveLength(2);
+  });
+
+  it('falls back when the estimated reduction is too small', async () => {
+    const fallback = await compactOrFallback(
+      transcript(),
+      { apiKey: 'test-key', preserveRecentMessages: 1, minReductionRatio: 0.25 },
+      jevFetch(() => 0.95),
+    );
     expect(fallback).toBeNull();
+  });
+
+  it('rejects malformed answers and failed requests', async () => {
+    await expect(
+      compactWithFetch(transcript(), { apiKey: 'test-key', preserveRecentMessages: 1 }, async () => ({
+        status: 200,
+        ok: true,
+        text: JSON.stringify({ answers: { call_t1: { noul: 0.5 } } }),
+      })),
+    ).rejects.toThrow(/Invalid Jev answer/);
+    await expect(
+      compactWithFetch(transcript(), { apiKey: 'test-key', preserveRecentMessages: 1 }, async () => ({
+        status: 500,
+        ok: false,
+        text: '',
+      })),
+    ).rejects.toThrow(/500/);
+    await expect(
+      compactWithFetch(transcript(), { preserveRecentMessages: 1 }, jevFetch(() => 0)),
+    ).rejects.toThrow(/TYPESAFE_API_KEY/);
   });
 });
