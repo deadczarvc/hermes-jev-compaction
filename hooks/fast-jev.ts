@@ -189,6 +189,8 @@ export function summarize(result: CompactResult): string {
   }; state ~${stats.stateTokens} tokens (${stats.stateStage}) in ${stats.requests} request(s)`;
 }
 
+const UI_LOG_MAX_CHARS = 4096;
+
 export function decisionLog(result: CompactResult): string {
   return result.decisions
     .filter((d) => d.reason !== 'pinned')
@@ -197,6 +199,29 @@ export function decisionLog(result: CompactResult): string {
         `${d.id}:${d.tool}:${d.action}/call=${d.keepCall.toFixed(2)}/result=${d.keepResult.toFixed(2)}`,
     )
     .join(' ');
+}
+
+export function decisionLogLines(
+  result: CompactResult,
+  maxChars: number = UI_LOG_MAX_CHARS,
+): string[] {
+  const entries = decisionLog(result).split(' ').filter(Boolean);
+  if (entries.length === 0) return ['decisions: (none)'];
+  const chunks: string[] = [];
+  let current = '';
+  for (const entry of entries) {
+    const next = current ? `${current} ${entry}` : entry;
+    if (current && next.length > maxChars - 24) {
+      chunks.push(current);
+      current = entry;
+    } else current = next;
+  }
+  chunks.push(current);
+  return chunks.map((chunk, index) =>
+    chunks.length === 1
+      ? `decisions: ${chunk}`
+      : `decisions (${index + 1}/${chunks.length}): ${chunk}`,
+  );
 }
 
 async function getApiKey(
@@ -242,7 +267,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
         const response = await $.http.fetch(url, init);
         return { status: response.status, ok: response.ok, text: response.text };
       });
-      $.ui.log(`decisions: ${decisionLog(result) || '(none)'}`);
+      for (const line of decisionLogLines(result)) $.ui.log(line);
       if (reductionRatio(result) < config.minReductionRatio) {
         notify(
           $,
