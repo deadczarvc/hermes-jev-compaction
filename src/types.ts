@@ -103,10 +103,7 @@ export interface CompactOptions {
   maxStateTokens?: number;
   /** Estimated token ceiling for state plus one batch of questions. Default 30000. */
   maxRequestTokens?: number;
-  /**
-   * Characters of a dropped tool result kept ahead of the removal note; 0 keeps
-   * only the note. Default 300.
-   */
+  /** Characters of a dropped tool result to retain. Default 300. */
   truncateHeadChars?: number;
 }
 

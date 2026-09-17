@@ -48,8 +48,8 @@
     },
     "truncateHeadChars": {
       "type": "number",
-      "title": "Dropped result head characters",
-      "description": "Characters of a dropped tool result kept ahead of the truncation note; 0 keeps only the note.",
+      "title": "Truncated tool result head",
+      "description": "Characters of a tool result kept when Jev decides its full output is no longer needed; 0 keeps only the note.",
       "default": 300
     },
     "model": {
