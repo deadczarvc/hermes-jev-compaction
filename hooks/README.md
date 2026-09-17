@@ -2,7 +2,11 @@
 
 This plugin uses Claude Code function hooks to replace a compaction with the
 original messages, minus the tool calls and tool results Jev judged no longer
-needed. User and assistant text is never touched. Jev is sent the whole
+needed. `hooks/fast-jev.ts` is a thin adapter: it reads the plugin options,
+finds the TypeSafe key, hands `session.compact` transcripts to the
+`fast-jev-compaction` library in `src/` (the plugin folder is the repository
+root, so the hook imports it directly) and maps the result back onto session
+messages. User and assistant text is never touched. Jev is sent the whole
 conversation as `state` (tool outputs replaced by a one-line note) and, for
 every tool call outside the pinned first and newest messages, two questions:
 whether the call should stay and whether its full output should stay. An
@@ -32,13 +36,13 @@ claude plugin install fast-jev-compaction@fast-jev-compaction
 For local development:
 
 ```sh
-CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir ./plugin
+CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir .
 ```
 
 ## Configuration
 
 The plugin declares these `userConfig` values in
-`plugin/.claude-plugin/plugin.json`:
+`.claude-plugin/plugin.json`:
 
 | Option | Default |
 | --- | ---: |
@@ -56,7 +60,9 @@ The TypeSafe key can be supplied as the sensitive `apiKey` plugin option or
 through `TYPESAFE_API_KEY`. The environment variable is the recommended
 development setup.
 
-The `session.compact` hook runs the Jev requests concurrently. If Jev fails,
+Every option except `apiKey`, `compactAtPercent`, `minReductionRatio` and
+`model` is passed straight to the library; see the root README for what they
+do. The `session.compact` hook runs the Jev requests concurrently. If Jev fails,
 the response is malformed, the key is unavailable, the history cannot be
 fitted into the state budget, or the estimated reduction is below
 `minReductionRatio`, the hook logs a fallback and delegates to Claude Code's
@@ -71,7 +77,7 @@ in-flight guard.
 
 Function hooks are early access and may change between Claude Code releases.
 This mod uses the generated declarations from 2.1.274 in
-`plugin/types/claude-code.d.ts`; regenerate and review that file after a
+`types/claude-code.d.ts`; regenerate and review that file after a
 Claude Code upgrade.
 
 References:

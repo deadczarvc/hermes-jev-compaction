@@ -1,73 +1,148 @@
-export type Role = 'system' | 'user' | 'assistant' | 'tool';
+export type Role = 'user' | 'assistant';
 
-export interface Chunk {
-  id: string;
-  role: Role;
-  turn: number;
-  text: string;
-  pinned?: boolean;
+/**
+ * A tool_use block of an assistant message. `text` and `isError` mirror the
+ * outcome once the transcript holds it (Claude Code attaches them).
+ */
+export interface ToolUse {
+  tool_use_id: string;
+  tool: string;
+  input: Record<string, unknown>;
+  text?: string;
+  isError?: boolean;
 }
 
-export type ChunkKind =
-  | 'user_instruction'
-  | 'decision'
-  | 'file_reference'
-  | 'error'
-  | 'pending_task'
-  | 'stale_tool_output'
-  | 'chatter'
-  | 'other';
+/** A tool_result block of a user message. */
+export interface ToolResult {
+  tool_use_id: string;
+  text: string;
+  isError?: boolean;
+}
 
-export interface ChunkDecision {
+/**
+ * One transcript message. The shape is a subset of Claude Code's
+ * `SessionMessage`, so a session transcript can be passed in as is.
+ */
+export interface Message {
+  role: Role;
+  text: string;
+  toolUses: ToolUse[];
+  toolResults?: ToolResult[];
+}
+
+/** A tool call paired with its result by `tool_use_id`. */
+export interface ToolCall {
+  /** Short id used in the Jev state and question names (`t1`, `t2`, ...). */
   id: string;
-  drop: number;
-  kind: ChunkKind;
-  kindConfidence: number;
-  action: 'keep' | 'drop';
-  reason:
-    | 'pinned'
-    | 'recent'
-    | 'protected_kind'
-    | 'below_threshold'
-    | 'low_confidence'
-    | 'dropped';
+  tool_use_id: string;
+  tool: string;
+  input: Record<string, unknown>;
+  /** Index of the message holding the tool_use block. */
+  callIndex: number;
+  /** Index of the message holding the tool_result block. */
+  resultIndex: number;
+  resultChars: number;
+  isError: boolean;
+  /** In the first or the newest preserved messages; never a candidate. */
+  pinned: boolean;
+}
+
+export interface CallAnswer {
+  /** Jev's probability that the call itself still matters. */
+  keepCall: number;
+  /** Jev's probability that the full result still needs to stay verbatim. */
+  keepResult: number;
+}
+
+export type CallAction = 'keep' | 'drop_result' | 'drop_call';
+
+export interface CallDecision extends CallAnswer {
+  id: string;
+  tool: string;
+  action: CallAction;
+  reason: 'pinned' | 'kept' | 'result_dropped' | 'call_dropped';
+}
+
+export interface HistoryToolCall {
+  id: string;
+  tool: string;
+  input: string;
+  result: string;
+}
+
+export interface HistoryEntry {
+  i: number;
+  role: Role;
+  text: string;
+  tool_calls?: HistoryToolCall[];
+}
+
+/** The state sent with every Jev request: the whole history, results omitted. */
+export interface CompactionState {
+  context: string;
+  goal: string;
+  history: HistoryEntry[];
+}
+
+export interface FittedState {
+  state: CompactionState;
+  tokens: number;
+  /** Which fitting stage produced the state, for diagnostics. */
+  stage: string;
 }
 
 export interface CompactOptions {
-  apiKey?: string;
-  model?: string;
-  baseUrl?: string;
+  /** Ongoing task description; defaults to the last few user prompts. */
   goal?: string;
-  dropThreshold?: number;
-  minKindConfidence?: number;
-  protectedKinds?: ChunkKind[];
-  preserveRecentTurns?: number;
-  maxQuestionsPerCall?: number;
-  fetch?: typeof fetch;
+  /** Minimum keep probability for a call or result to stay. Default 0.5. */
+  keepThreshold?: number;
+  /** Newest messages never touched (the first message is always kept). Default 6. */
+  preserveRecentMessages?: number;
+  /** Estimated token ceiling for the state. Default 25000. */
+  maxStateTokens?: number;
+  /** Estimated token ceiling for state plus one batch of questions. Default 30000. */
+  maxRequestTokens?: number;
+  /** Characters per token used for the estimates. Default 3.5. */
+  charsPerToken?: number;
+}
+
+export interface ResolvedCompactOptions {
+  goal: string;
+  keepThreshold: number;
+  preserveRecentMessages: number;
+  maxStateTokens: number;
+  maxRequestTokens: number;
+  charsPerToken: number;
 }
 
 export interface CompactResult {
-  kept: Chunk[];
-  dropped: Chunk[];
-  decisions: ChunkDecision[];
+  /** The compacted transcript; untouched messages are the input objects. */
+  messages: Message[];
+  decisions: CallDecision[];
   stats: {
-    chunks: number;
-    kept: number;
-    dropped: number;
-    calls: number;
+    messagesBefore: number;
+    messagesAfter: number;
     charsBefore: number;
     charsAfter: number;
+    calls: number;
+    kept: number;
+    resultsDropped: number;
+    callsDropped: number;
+    pinned: number;
+    stateTokens: number;
+    /** Which fitting stage the state needed, '' when no request was made. */
+    stateStage: string;
+    requests: number;
     ms: number;
   };
 }
 
-export type JsonPrimitive = string | number | boolean | null;
-export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
-export type JevState = string | JsonValue;
+/** The `state` of a Jev request: a string or any JSON-serialisable object. */
+export type JevState = string | object;
 
 export interface NoulQuestion {
   type: 'noul';
-  instructions: string | JsonValue;
+  instructions: string;
   criteria?: {
     true?: string;
     false?: string;
@@ -76,13 +151,13 @@ export interface NoulQuestion {
 
 export interface ChoiceQuestion {
   type: 'choice';
-  instructions: string | JsonValue;
+  instructions: string;
   criteria: Record<string, string | null>;
 }
 
 export interface ScoreQuestion {
   type: 'score';
-  instructions: string | JsonValue;
+  instructions: string;
   criteria: string[];
 }
 
@@ -118,4 +193,9 @@ export interface JevResponse {
     output_tokens?: number;
   };
   [key: string]: unknown;
+}
+
+/** Anything that can answer Jev questions: `JevClient`, or a host-provided adapter. */
+export interface JevAsker {
+  ask(state: JevState, questions: JevQuestions): Promise<JevResponse>;
 }
