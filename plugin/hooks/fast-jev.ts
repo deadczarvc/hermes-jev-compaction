@@ -16,6 +16,7 @@ const DEFAULTS = {
   maxStateTokens: 25_000,
   maxRequestTokens: 30_000,
   charsPerToken: 3.5,
+  truncateHeadChars: 300,
   model: 'jev-latest',
 };
 
@@ -54,6 +55,7 @@ export type ModConfig = {
   maxStateTokens?: number;
   maxRequestTokens?: number;
   charsPerToken?: number;
+  truncateHeadChars?: number;
   model?: string;
   goal?: string;
 };
@@ -67,6 +69,7 @@ type ResolvedConfig = {
   maxStateTokens: number;
   maxRequestTokens: number;
   charsPerToken: number;
+  truncateHeadChars: number;
   model: string;
   goal: string;
 };
@@ -193,6 +196,12 @@ function resolveConfig(options: PluginOptions | ModConfig): ResolvedConfig {
     charsPerToken: Math.max(
       0.1,
       optionNumber(options, 'charsPerToken', DEFAULTS.charsPerToken),
+    ),
+    truncateHeadChars: Math.max(
+      0,
+      Math.floor(
+        optionNumber(options, 'truncateHeadChars', DEFAULTS.truncateHeadChars),
+      ),
     ),
     model: optionString(options, 'model', DEFAULTS.model),
     goal: optionString(options, 'goal', ''),
@@ -476,13 +485,20 @@ async function askBatch(
   );
 }
 
-function removedNote(result: ToolResultSummary): string {
-  return `[tool result removed during compaction: ${result.text.length} chars${
-    result.isError ? ', error' : ''
+function truncatedResultText(
+  text: string,
+  isError: boolean,
+  headChars: number,
+): string {
+  if (text.length <= headChars + 120) return text;
+  const head = headChars > 0 ? `${text.slice(0, headChars)}\n` : '';
+  return `${head}[fast-jev-compaction truncated ${text.length - headChars} chars of this tool result${
+    isError ? ' (error)' : ''
   }; re-run the tool if needed]`;
 }
 
 function strippedToolUse(tool: ToolUseSummary, note: string): ToolUseSummary {
+  if ((tool.text ?? '') === note) return tool;
   const copy: ToolUseSummary = {
     tool_use_id: tool.tool_use_id,
     tool: tool.tool,
@@ -495,7 +511,7 @@ function strippedToolUse(tool: ToolUseSummary, note: string): ToolUseSummary {
 
 /**
  * Rebuilds the conversation from the decisions. A dropped call disappears
- * together with its result; a dropped result is replaced by a one-line note.
+ * together with its result; a dropped result keeps a bounded head and note.
  * Messages that lose all their content are removed; untouched messages keep
  * the engine's handle.
  */
@@ -503,6 +519,7 @@ export function applyDecisions(
   messages: readonly SessionMessage[],
   decisions: readonly CallDecision[],
   calls: readonly ToolCall[],
+  headChars: number,
 ): SessionMessage[] {
   const actionById = new Map<string, CallDecision['action']>();
   for (const decision of decisions) {
@@ -527,7 +544,11 @@ export function applyDecisions(
         actionById.get(tool.tool_use_id) === 'drop_result'
           ? strippedToolUse(
               tool,
-              `[tool result removed during compaction: ${tool.text?.length ?? 0} chars; re-run the tool if needed]`,
+              truncatedResultText(
+                tool.text ?? '',
+                tool.isError ?? false,
+                headChars,
+              ),
             )
           : tool,
       );
@@ -535,13 +556,37 @@ export function applyDecisions(
       .filter((result) => actionById.get(result.tool_use_id) !== 'drop_call')
       .map((result) =>
         actionById.get(result.tool_use_id) === 'drop_result'
-          ? {
-              tool_use_id: result.tool_use_id,
-              text: removedNote(result),
-              isError: result.isError,
-            }
+          ? (() => {
+              const text = truncatedResultText(
+                result.text,
+                result.isError,
+                headChars,
+              );
+              return text === result.text
+                ? result
+                : {
+                    tool_use_id: result.tool_use_id,
+                    text,
+                    isError: result.isError,
+                  };
+            })()
           : result,
       );
+    if (
+      !message.toolUses.some(
+        (tool) => actionById.get(tool.tool_use_id) === 'drop_call',
+      ) &&
+      !(message.toolResults ?? []).some(
+        (result) => actionById.get(result.tool_use_id) === 'drop_call',
+      ) &&
+      toolUses.every((tool, index) => tool === message.toolUses[index]) &&
+      toolResults.every(
+        (result, index) => result === message.toolResults?.[index],
+      )
+    ) {
+      kept.push(message);
+      continue;
+    }
     if (message.text.trim().length === 0 && toolUses.length === 0 && toolResults.length === 0) {
       continue;
     }
@@ -607,7 +652,12 @@ export async function compactWithFetch(
       config,
     ),
   );
-  const kept = applyDecisions(messages, decisions, calls);
+  const kept = applyDecisions(
+    messages,
+    decisions,
+    calls,
+    config.truncateHeadChars,
+  );
   return {
     messages: kept,
     decisions,
@@ -639,7 +689,10 @@ function summarize(result: CompactionOutput): string {
   for (const decision of result.decisions) {
     counts.set(decision.reason, (counts.get(decision.reason) ?? 0) + 1);
   }
-  const parts = [...counts.entries()].map(([reason, count]) => `${count} ${reason}`);
+  const parts = [...counts.entries()].map(([reason, count]) => {
+    const label = reason === 'result_dropped' ? 'results truncated' : reason;
+    return `${count} ${label}`;
+  });
   return `${percent(reductionRatio(result))} reduction; ${
     parts.join(', ') || 'no tool calls'
   }; state ~${result.stateTokens} tokens in ${result.requests} request(s)`;
@@ -666,6 +719,7 @@ function optionConfig(options: PluginOptions): ModConfig {
     maxStateTokens: resolved.maxStateTokens,
     maxRequestTokens: resolved.maxRequestTokens,
     charsPerToken: resolved.charsPerToken,
+    truncateHeadChars: resolved.truncateHeadChars,
     model: resolved.model,
   };
 }

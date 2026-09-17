@@ -218,15 +218,17 @@ describe('decisions', () => {
     });
   });
 
-  it('removes dropped calls with their results and replaces dropped results with a note', () => {
+  it('removes dropped calls and truncates dropped results', () => {
     const messages = transcript();
+    messages[4]!.toolUses[0]!.text = 'x'.repeat(2000);
+    messages[5]!.toolResults![0]!.text = 'x'.repeat(2000);
     const calls = collectToolCalls(messages, 0);
     const decisions = [
       decideCall(calls[0]!, { keepCall: 0.1, keepResult: 0.1 }, config),
       decideCall(calls[1]!, { keepCall: 0.9, keepResult: 0.1 }, config),
       decideCall(calls[2]!, { keepCall: 0.9, keepResult: 0.9 }, config),
     ];
-    const kept = applyDecisions(messages, decisions, calls);
+    const kept = applyDecisions(messages, decisions, calls, 300);
 
     expect(kept.map((m) => m.text || m.toolUses[0]?.tool_use_id || m.toolResults?.[0]?.tool_use_id)).toEqual([
       'Never edit anything under src/generated. Fix the failing test.',
@@ -238,11 +240,27 @@ describe('decisions', () => {
       'The failure is in b.test.ts; fixing now.',
       'go ahead',
     ]);
-    expect(kept[2]?.toolUses[0]?.text).toMatch(/tool result removed/);
+    expect(kept[2]?.toolUses[0]?.text).toMatch(
+      new RegExp(`^${'x'.repeat(300)}\\n\\[fast-jev-compaction truncated 1700 chars`),
+    );
     expect(kept[2]?.handle).toBeUndefined();
-    expect(kept[3]?.toolResults?.[0]?.text).toMatch(/^\[tool result removed during compaction: \d+ chars; re-run/);
+    expect(kept[3]?.toolResults?.[0]?.text).toMatch(
+      new RegExp(`^${'x'.repeat(300)}\\n\\[fast-jev-compaction truncated 1700 chars`),
+    );
+    expect(kept[3]?.handle).toBeUndefined();
     expect(kept[4]?.handle).toBe('h-tool-3');
     expect(kept[5]?.toolResults?.[0]?.text).toContain('expected 2 to be 3');
+
+    const shortMessages = transcript();
+    shortMessages[4]!.toolUses[0]!.text = 'y'.repeat(100);
+    shortMessages[5]!.toolResults![0]!.text = 'y'.repeat(100);
+    const shortKept = applyDecisions(shortMessages, decisions, calls, 300);
+    expect(shortKept.find((message) => message.handle === 'h-tool-2')).toBe(
+      shortMessages[4],
+    );
+    expect(shortKept.find((message) => message.handle === 'r-tool-2')).toBe(
+      shortMessages[5],
+    );
   });
 });
 
@@ -275,7 +293,7 @@ describe('end to end', () => {
     expect(states.size).toBe(1);
     expect(output.decisions.map((d) => d.action)).toEqual(['drop_result', 'drop_result', 'drop_result']);
     expect(output.messages).toHaveLength(messages.length);
-    expect(output.charsAfter).toBeLessThan(output.charsBefore * 0.25);
+    expect(output.charsAfter).toBeLessThan(output.charsBefore);
   });
 
   it('keeps everything without calling Jev when no tool call is a candidate', async () => {
