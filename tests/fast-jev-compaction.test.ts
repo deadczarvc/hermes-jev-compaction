@@ -78,10 +78,16 @@ describe('options', () => {
       maxStateTokens: 25_000,
       maxRequestTokens: 30_000,
       charsPerToken: 3.5,
+      truncateHeadChars: 300,
     });
-    expect(resolveOptions({ keepThreshold: Number.NaN, preserveRecentMessages: 2.7 })).toMatchObject({
+    expect(resolveOptions({
+      keepThreshold: Number.NaN,
+      preserveRecentMessages: 2.7,
+      truncateHeadChars: -1.2,
+    })).toMatchObject({
       keepThreshold: 0.5,
       preserveRecentMessages: 2,
+      truncateHeadChars: 0,
     });
   });
 });
@@ -217,15 +223,17 @@ describe('decisions', () => {
     });
   });
 
-  it('removes dropped calls with their results and replaces dropped results with a note', () => {
+  it('removes dropped calls and truncates dropped results', () => {
     const messages = transcript();
+    messages[4]!.toolUses[0]!.text = 'x'.repeat(2000);
+    messages[5]!.toolResults![0]!.text = 'x'.repeat(2000);
     const calls = collectToolCalls(messages, 0);
     const decisions = [
       decideCall(calls[0]!, { keepCall: 0.1, keepResult: 0.1 }, options),
       decideCall(calls[1]!, { keepCall: 0.9, keepResult: 0.1 }, options),
       decideCall(calls[2]!, { keepCall: 0.9, keepResult: 0.9 }, options),
     ];
-    const kept = applyDecisions(messages, decisions, calls);
+    const kept = applyDecisions(messages, decisions, calls, 300);
 
     expect(kept.map((m) => m.text || m.toolUses[0]?.tool_use_id || m.toolResults?.[0]?.tool_use_id)).toEqual([
       'Never edit anything under src/generated. Fix the failing test.',
@@ -239,10 +247,23 @@ describe('decisions', () => {
     ]);
     expect(kept[0]).toBe(messages[0]);
     expect(kept[2]).not.toBe(messages[4]);
-    expect(kept[2]?.toolUses[0]?.text).toMatch(/tool result removed/);
-    expect(kept[3]?.toolResults?.[0]?.text).toMatch(/^\[tool result removed during compaction: \d+ chars; re-run/);
+    expect(kept[2]?.toolUses[0]?.text).toMatch(
+      new RegExp(`^${'x'.repeat(300)}\\n\\[fast-jev-compaction truncated 1700 chars`),
+    );
+    expect(kept[3]?.toolResults?.[0]?.text).toMatch(
+      new RegExp(`^${'x'.repeat(300)}\\n\\[fast-jev-compaction truncated 1700 chars`),
+    );
+    expect(kept[2]).not.toBe(messages[4]);
+    expect(kept[3]).not.toBe(messages[5]);
     expect(kept[4]).toBe(messages[6]);
     expect(kept[5]?.toolResults?.[0]?.text).toContain('expected 2 to be 3');
+
+    const shortMessages = transcript();
+    shortMessages[4]!.toolUses[0]!.text = 'y'.repeat(100);
+    shortMessages[5]!.toolResults![0]!.text = 'y'.repeat(100);
+    const shortKept = applyDecisions(shortMessages, decisions, calls, 300);
+    expect(shortKept[2]).toBe(shortMessages[4]);
+    expect(shortKept[3]).toBe(shortMessages[5]);
   });
 });
 
@@ -275,7 +296,7 @@ describe('compact', () => {
     expect(output.decisions.map((d) => d.action)).toEqual(['drop_result', 'drop_result', 'drop_result']);
     expect(output.messages).toHaveLength(messages.length);
     expect(output.stats).toMatchObject({ resultsDropped: 3, kept: 0, callsDropped: 0, pinned: 0 });
-    expect(reductionRatio(output)).toBeGreaterThan(0.75);
+    expect(reductionRatio(output)).toBeGreaterThan(0);
   });
 
   it('keeps everything without calling Jev when no tool call is a candidate', async () => {

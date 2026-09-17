@@ -11,7 +11,6 @@ import type {
   Message,
   ResolvedCompactOptions,
   ToolCall,
-  ToolResult,
   ToolUse,
 } from './types.js';
 
@@ -22,6 +21,7 @@ export const DEFAULT_OPTIONS: ResolvedCompactOptions = {
   maxStateTokens: 25_000,
   maxRequestTokens: 30_000,
   charsPerToken: 3.5,
+  truncateHeadChars: 300,
 };
 
 function finite(value: number | undefined, fallback: number): number {
@@ -44,6 +44,10 @@ export function resolveOptions(options: CompactOptions = {}): ResolvedCompactOpt
       finite(options.maxRequestTokens, DEFAULT_OPTIONS.maxRequestTokens),
     ),
     charsPerToken: Math.max(0.1, finite(options.charsPerToken, DEFAULT_OPTIONS.charsPerToken)),
+    truncateHeadChars: Math.max(
+      0,
+      Math.floor(finite(options.truncateHeadChars, DEFAULT_OPTIONS.truncateHeadChars)),
+    ),
   };
 }
 
@@ -127,34 +131,17 @@ async function askBatch(
   );
 }
 
-function removedNote(chars: number, isError: boolean): string {
-  return `[tool result removed during compaction: ${chars} chars${
-    isError ? ', error' : ''
+function truncatedResultText(text: string, isError: boolean, headChars: number): string {
+  if (text.length <= headChars + 120) return text;
+  const head = headChars > 0 ? `${text.slice(0, headChars)}\n` : '';
+  return `${head}[fast-jev-compaction truncated ${text.length - headChars} chars of this tool result${
+    isError ? ' (error)' : ''
   }; re-run the tool if needed]`;
-}
-
-function withoutResult(tool: ToolUse): ToolUse {
-  const copy: ToolUse = {
-    tool_use_id: tool.tool_use_id,
-    tool: tool.tool,
-    input: tool.input,
-    text: removedNote(tool.text?.length ?? 0, tool.isError ?? false),
-  };
-  if (tool.isError) copy.isError = true;
-  return copy;
-}
-
-function resultNote(result: ToolResult): ToolResult {
-  return {
-    tool_use_id: result.tool_use_id,
-    text: removedNote(result.text.length, result.isError ?? false),
-    isError: result.isError ?? false,
-  };
 }
 
 /**
  * Rebuilds the conversation from the decisions. A dropped call disappears
- * together with its result; a dropped result is replaced by a one-line note.
+ * together with its result; a dropped result keeps a bounded head and note.
  * Messages that lose all their content are removed; untouched messages are
  * returned as the same objects they came in as.
  */
@@ -162,6 +149,7 @@ export function applyDecisions(
   messages: readonly Message[],
   decisions: readonly CallDecision[],
   calls: readonly ToolCall[],
+  headChars: number,
 ): Message[] {
   const byId = new Map(calls.map((call) => [call.id, call]));
   const actions = new Map<string, CallDecision['action']>();
@@ -180,12 +168,51 @@ export function applyDecisions(
     }
     const toolUses = message.toolUses
       .filter((tool) => actions.get(tool.tool_use_id) !== 'drop_call')
-      .map((tool) => (actions.get(tool.tool_use_id) === 'drop_result' ? withoutResult(tool) : tool));
+      .map((tool) => {
+        if (actions.get(tool.tool_use_id) !== 'drop_result') return tool;
+        const text = truncatedResultText(
+          tool.text ?? '',
+          tool.isError ?? false,
+          headChars,
+        );
+        if ((tool.text ?? '') === text) return tool;
+        const copy: ToolUse = {
+          tool_use_id: tool.tool_use_id,
+          tool: tool.tool,
+          input: tool.input,
+          text,
+        };
+        if (tool.isError) copy.isError = true;
+        return copy;
+      });
     const toolResults = (message.toolResults ?? [])
       .filter((result) => actions.get(result.tool_use_id) !== 'drop_call')
-      .map((result) =>
-        actions.get(result.tool_use_id) === 'drop_result' ? resultNote(result) : result,
-      );
+      .map((result) => {
+        if (actions.get(result.tool_use_id) !== 'drop_result') return result;
+        const text = truncatedResultText(result.text, result.isError ?? false, headChars);
+        return text === result.text
+          ? result
+          : {
+              tool_use_id: result.tool_use_id,
+              text,
+              isError: result.isError,
+            };
+      });
+    if (
+      !message.toolUses.some(
+        (tool) => actions.get(tool.tool_use_id) === 'drop_call',
+      ) &&
+      !(message.toolResults ?? []).some(
+        (result) => actions.get(result.tool_use_id) === 'drop_call',
+      ) &&
+      toolUses.every((tool, index) => tool === message.toolUses[index]) &&
+      toolResults.every(
+        (result, index) => result === message.toolResults?.[index],
+      )
+    ) {
+      kept.push(message);
+      continue;
+    }
     if (message.text.trim().length === 0 && toolUses.length === 0 && toolResults.length === 0) {
       continue;
     }
@@ -253,7 +280,12 @@ export async function compact(
   const decisions = calls.map((call) =>
     decideCall(call, answers.get(call.id) ?? { keepCall: 1, keepResult: 1 }, resolved),
   );
-  const kept = applyDecisions(messages, decisions, calls);
+  const kept = applyDecisions(
+    messages,
+    decisions,
+    calls,
+    resolved.truncateHeadChars,
+  );
   return {
     messages: kept,
     decisions,

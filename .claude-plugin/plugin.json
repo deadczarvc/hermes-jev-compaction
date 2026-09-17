@@ -52,6 +52,12 @@
       "description": "Ratio used to estimate token counts from character counts.",
       "default": 3.5
     },
+    "truncateHeadChars": {
+      "type": "number",
+      "title": "Truncated tool result head",
+      "description": "Characters of a tool result kept when Jev decides its full output is no longer needed; 0 keeps only the note.",
+      "default": 300
+    },
     "model": {
       "type": "string",
       "title": "Jev model",
