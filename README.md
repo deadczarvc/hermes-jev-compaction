@@ -149,3 +149,17 @@ TYPESAFE_API_KEY="$(cat ~/.typesafe_key)" npm run demo
 
 The unit tests mock `fetch` and never contact TypeSafe. The demo is the live
 network check.
+
+## Animated demo (macOS)
+
+`demo/JevDemo` is a small native SwiftUI app that plays a scripted, dramatized
+version of the compaction flow inside a Claude Code-style terminal: transcript
+chunks are scanned, marked green (keep) or red (drop), and the red ones
+collapse away. It uses a canned transcript and never calls the API; it exists
+to be screen recorded.
+
+```sh
+demo/JevDemo/build.sh   # builds demo/JevDemo/build/JevDemo.app and launches it
+```
+
+Press space in the app to replay from the start.
