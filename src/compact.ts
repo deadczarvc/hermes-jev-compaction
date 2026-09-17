@@ -21,8 +21,11 @@ export const DEFAULT_OPTIONS: ResolvedCompactOptions = {
   preserveRecentMessages: 6,
   maxStateTokens: 25_000,
   maxRequestTokens: 30_000,
-  charsPerToken: 3.5,
+  truncateHeadChars: 300,
 };
+
+/** Tokens the request envelope (`model`, key names) adds around state and questions. */
+const REQUEST_OVERHEAD_TOKENS = 20;
 
 function finite(value: number | undefined, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
@@ -43,7 +46,10 @@ export function resolveOptions(options: CompactOptions = {}): ResolvedCompactOpt
       1,
       finite(options.maxRequestTokens, DEFAULT_OPTIONS.maxRequestTokens),
     ),
-    charsPerToken: Math.max(0.1, finite(options.charsPerToken, DEFAULT_OPTIONS.charsPerToken)),
+    truncateHeadChars: Math.max(
+      0,
+      Math.floor(finite(options.truncateHeadChars, DEFAULT_OPTIONS.truncateHeadChars)),
+    ),
   };
 }
 
@@ -68,14 +74,14 @@ export function questionsFor(call: ToolCall): JevQuestions {
 export function batchCalls(
   calls: readonly ToolCall[],
   stateTokens: number,
-  options: Pick<ResolvedCompactOptions, 'maxRequestTokens' | 'charsPerToken'>,
+  options: Pick<ResolvedCompactOptions, 'maxRequestTokens'>,
 ): ToolCall[][] {
-  const budget = options.maxRequestTokens - stateTokens;
+  const budget = options.maxRequestTokens - stateTokens - REQUEST_OVERHEAD_TOKENS;
   const batches: ToolCall[][] = [];
   let current: ToolCall[] = [];
   let currentTokens = 0;
   for (const call of calls) {
-    const tokens = estimateTokens(JSON.stringify(questionsFor(call)), options.charsPerToken);
+    const tokens = estimateTokens(JSON.stringify(questionsFor(call)));
     if (current.length > 0 && currentTokens + tokens > budget) {
       batches.push(current);
       current = [];
@@ -127,42 +133,52 @@ async function askBatch(
   );
 }
 
-function removedNote(chars: number, isError: boolean): string {
-  return `[tool result removed during compaction: ${chars} chars${
-    isError ? ', error' : ''
-  }; re-run the tool if needed]`;
+/** Results this close to the head limit are left whole: a note would save nothing. */
+const TRUNCATE_SLACK = 120;
+
+/**
+ * What a dropped result becomes: its first `headChars` characters, then a note
+ * saying how much was cut. A result short enough is returned unchanged.
+ */
+export function truncatedResultText(text: string, isError: boolean, headChars: number): string {
+  if (text.length <= headChars + TRUNCATE_SLACK) return text;
+  const head = headChars > 0 ? `${text.slice(0, headChars)}\n` : '';
+  return `${head}[tool result truncated during compaction: ${text.length - headChars} of ${
+    text.length
+  } chars removed${isError ? ', error' : ''}; re-run the tool if needed]`;
 }
 
-function withoutResult(tool: ToolUse): ToolUse {
-  const copy: ToolUse = {
-    tool_use_id: tool.tool_use_id,
-    tool: tool.tool,
-    input: tool.input,
-    text: removedNote(tool.text?.length ?? 0, tool.isError ?? false),
-  };
+function withoutResult(tool: ToolUse, headChars: number): ToolUse {
+  const copy: ToolUse = { tool_use_id: tool.tool_use_id, tool: tool.tool, input: tool.input };
+  if (tool.text !== undefined) {
+    copy.text = truncatedResultText(tool.text, tool.isError ?? false, headChars);
+  }
   if (tool.isError) copy.isError = true;
   return copy;
 }
 
-function resultNote(result: ToolResult): ToolResult {
+function truncatedResult(result: ToolResult, headChars: number): ToolResult {
   return {
     tool_use_id: result.tool_use_id,
-    text: removedNote(result.text.length, result.isError ?? false),
+    text: truncatedResultText(result.text, result.isError ?? false, headChars),
     isError: result.isError ?? false,
   };
 }
 
 /**
  * Rebuilds the conversation from the decisions. A dropped call disappears
- * together with its result; a dropped result is replaced by a one-line note.
- * Messages that lose all their content are removed; untouched messages are
- * returned as the same objects they came in as.
+ * together with its result; a dropped result keeps its first
+ * `truncateHeadChars` characters followed by a note. Messages that lose all
+ * their content are removed; untouched messages are returned as the same
+ * objects they came in as.
  */
 export function applyDecisions(
   messages: readonly Message[],
   decisions: readonly CallDecision[],
   calls: readonly ToolCall[],
+  options: Pick<ResolvedCompactOptions, 'truncateHeadChars'> = DEFAULT_OPTIONS,
 ): Message[] {
+  const headChars = options.truncateHeadChars;
   const byId = new Map(calls.map((call) => [call.id, call]));
   const actions = new Map<string, CallDecision['action']>();
   for (const decision of decisions) {
@@ -180,11 +196,15 @@ export function applyDecisions(
     }
     const toolUses = message.toolUses
       .filter((tool) => actions.get(tool.tool_use_id) !== 'drop_call')
-      .map((tool) => (actions.get(tool.tool_use_id) === 'drop_result' ? withoutResult(tool) : tool));
+      .map((tool) =>
+        actions.get(tool.tool_use_id) === 'drop_result' ? withoutResult(tool, headChars) : tool,
+      );
     const toolResults = (message.toolResults ?? [])
       .filter((result) => actions.get(result.tool_use_id) !== 'drop_call')
       .map((result) =>
-        actions.get(result.tool_use_id) === 'drop_result' ? resultNote(result) : result,
+        actions.get(result.tool_use_id) === 'drop_result'
+          ? truncatedResult(result, headChars)
+          : result,
       );
     if (message.text.trim().length === 0 && toolUses.length === 0 && toolResults.length === 0) {
       continue;
@@ -253,7 +273,7 @@ export async function compact(
   const decisions = calls.map((call) =>
     decideCall(call, answers.get(call.id) ?? { keepCall: 1, keepResult: 1 }, resolved),
   );
-  const kept = applyDecisions(messages, decisions, calls);
+  const kept = applyDecisions(messages, decisions, calls, resolved);
   return {
     messages: kept,
     decisions,

@@ -74,7 +74,8 @@ export interface HistoryEntry {
   i: number;
   role: Role;
   text: string;
-  tool_calls?: HistoryToolCall[];
+  /** Structured per call, or one compact line per call once the state has to shrink. */
+  tool_calls?: HistoryToolCall[] | string[];
 }
 
 /** The state sent with every Jev request: the whole history, results omitted. */
@@ -102,8 +103,11 @@ export interface CompactOptions {
   maxStateTokens?: number;
   /** Estimated token ceiling for state plus one batch of questions. Default 30000. */
   maxRequestTokens?: number;
-  /** Characters per token used for the estimates. Default 3.5. */
-  charsPerToken?: number;
+  /**
+   * Characters of a dropped tool result kept ahead of the removal note; 0 keeps
+   * only the note. Default 300.
+   */
+  truncateHeadChars?: number;
 }
 
 export interface ResolvedCompactOptions {
@@ -112,7 +116,7 @@ export interface ResolvedCompactOptions {
   preserveRecentMessages: number;
   maxStateTokens: number;
   maxRequestTokens: number;
-  charsPerToken: number;
+  truncateHeadChars: number;
 }
 
 export interface CompactResult {

@@ -7,11 +7,14 @@ import {
   compact,
   compactMessages,
   decideCall,
+  estimateTokens,
   fitState,
   JevClient,
   parseJevResponse,
   reductionRatio,
   resolveOptions,
+  truncatedResultText,
+  type HistoryToolCall,
   type JevAsker,
   type JevQuestions,
   type Message,
@@ -65,7 +68,6 @@ function fakeJev(answer: (name: string) => number, seen: Seen[] = []): JevAsker 
 
 const fit = {
   maxStateTokens: 25_000,
-  charsPerToken: 3.5,
   preserveRecentMessages: 0,
   goal: 'fix the test',
 };
@@ -77,12 +79,26 @@ describe('options', () => {
       preserveRecentMessages: 6,
       maxStateTokens: 25_000,
       maxRequestTokens: 30_000,
-      charsPerToken: 3.5,
+      truncateHeadChars: 300,
     });
-    expect(resolveOptions({ keepThreshold: Number.NaN, preserveRecentMessages: 2.7 })).toMatchObject({
+    expect(
+      resolveOptions({ keepThreshold: Number.NaN, preserveRecentMessages: 2.7, truncateHeadChars: -5 }),
+    ).toMatchObject({
       keepThreshold: 0.5,
       preserveRecentMessages: 2,
+      truncateHeadChars: 0,
     });
+  });
+});
+
+describe('token estimate', () => {
+  it('charges words, digits and symbols separately and never undercounts JSON badly', () => {
+    expect(estimateTokens('')).toBe(0);
+    expect(estimateTokens('hello world')).toBe(2);
+    expect(estimateTokens('internationalization')).toBe(4);
+    expect(estimateTokens('12345678')).toBe(4);
+    const json = JSON.stringify({ file_path: '/Users/x/src/a.ts', old_string: 'a = 1;', n: 42 });
+    expect(estimateTokens(json)).toBeGreaterThanOrEqual(Math.ceil(json.length / 3));
   });
 });
 
@@ -118,7 +134,7 @@ describe('state fitting', () => {
       tool: 'Read',
       result: `ok, ${fileA.length} chars (omitted)`,
     });
-    expect(state.history[4]?.tool_calls?.[0]?.result).toMatch(/^error, /);
+    expect((state.history[4]?.tool_calls?.[0] as HistoryToolCall).result).toMatch(/^error, /);
   });
 
   it('defaults the goal to the latest user prompts', () => {
@@ -141,7 +157,42 @@ describe('state fitting', () => {
     expect(stage).toBe('inputs<=200');
     expect(tokens).toBeLessThanOrEqual(300);
     expect(state.history[0]?.text).toBe('start');
-    expect(state.history[1]?.tool_calls?.[0]?.input.length).toBeLessThanOrEqual(200);
+    expect((state.history[1]?.tool_calls?.[0] as HistoryToolCall).input.length).toBeLessThanOrEqual(200);
+  });
+
+  it('shrinks old tool calls to one line each when nothing else is left to cut', () => {
+    const messages = [message('user', 'start')];
+    for (let i = 0; i < 40; i += 1) {
+      messages.push(call(`c${i}`, 'Read', { file_path: `/repo/src/module-${i}.ts` }, 'x'), result(`c${i}`, 'x'));
+    }
+    messages.push(message('assistant', 'done'));
+    const calls = collectToolCalls(messages, 1);
+    const full = fitState(messages, calls, { ...fit, preserveRecentMessages: 1 });
+    const compacted = fitState(messages, calls, {
+      ...fit,
+      preserveRecentMessages: 1,
+      maxStateTokens: Math.floor(full.tokens * 0.8),
+    });
+    expect(compacted.stage).toBe('old calls compacted');
+    expect(compacted.tokens).toBeLessThanOrEqual(Math.floor(full.tokens * 0.8));
+    expect(compacted.tokens).toBeGreaterThanOrEqual(estimateTokens(JSON.stringify(compacted.state)));
+    expect(compacted.state.history[1]?.tool_calls?.[0]).toBe(
+      't1 Read file_path=/repo/src/module-0.ts → ok 1ch',
+    );
+    expect(compacted.state.history.at(-1)?.text).toBe('done');
+
+    const merged = fitState(messages, calls, {
+      ...fit,
+      preserveRecentMessages: 1,
+      maxStateTokens: Math.floor(full.tokens * 0.45),
+    });
+    expect(merged.stage).toBe('old calls merged');
+    expect(merged.tokens).toBeLessThanOrEqual(Math.floor(full.tokens * 0.45));
+    expect(merged.state.history).toHaveLength(3);
+    expect(merged.state.history[1]?.tool_calls).toHaveLength(40);
+    expect(merged.state.history[1]?.tool_calls?.[39]).toMatch(/^t40 Read /);
+    expect(merged.state.history[0]?.text).toBe('start');
+    expect(merged.state.history[2]?.text).toBe('done');
   });
 
   it('abridges long texts oldest-first and collapses old messages last', () => {
@@ -186,7 +237,7 @@ describe('question batching', () => {
     isError: false,
     pinned: false,
   }));
-  const options = { maxRequestTokens: 30_000, charsPerToken: 3.5 };
+  const options = { maxRequestTokens: 30_000 };
 
   it('puts everything in one request when it fits', () => {
     expect(batchCalls(calls, 1000, options)).toHaveLength(1);
@@ -239,10 +290,35 @@ describe('decisions', () => {
     ]);
     expect(kept[0]).toBe(messages[0]);
     expect(kept[2]).not.toBe(messages[4]);
-    expect(kept[2]?.toolUses[0]?.text).toMatch(/tool result removed/);
-    expect(kept[3]?.toolResults?.[0]?.text).toMatch(/^\[tool result removed during compaction: \d+ chars; re-run/);
+    const original = messages[5]!.toolResults![0]!.text;
+    const expected = `${original.slice(0, 300)}\n[tool result truncated during compaction: ${
+      original.length - 300
+    } of ${original.length} chars removed; re-run the tool if needed]`;
+    expect(kept[3]?.toolResults?.[0]?.text).toBe(expected);
+    expect(kept[2]?.toolUses[0]?.text).toBe(expected);
     expect(kept[4]).toBe(messages[6]);
     expect(kept[5]?.toolResults?.[0]?.text).toContain('expected 2 to be 3');
+  });
+
+  it('keeps a short dropped result whole and honours truncateHeadChars', () => {
+    const short = 'x'.repeat(400);
+    const long = `${'line\n'.repeat(200)}tail`;
+    expect(truncatedResultText(short, false, 300)).toBe(short);
+    expect(truncatedResultText(long, false, 100)).toBe(
+      `${long.slice(0, 100)}\n[tool result truncated during compaction: ${long.length - 100} of ${
+        long.length
+      } chars removed; re-run the tool if needed]`,
+    );
+    expect(truncatedResultText(long, true, 0)).toBe(
+      `[tool result truncated during compaction: ${long.length} of ${long.length} chars removed, error; re-run the tool if needed]`,
+    );
+
+    const messages = transcript();
+    const calls = collectToolCalls(messages, 0);
+    const decisions = [decideCall(calls[0]!, { keepCall: 0.9, keepResult: 0.1 }, { keepThreshold: 0.5 })];
+    const kept = applyDecisions(messages, decisions, calls, { truncateHeadChars: 0 });
+    expect(kept[2]?.toolResults?.[0]?.text).toMatch(/^\[tool result truncated during compaction: 1000 of 1000 chars removed;/);
+    expect(kept[1]?.toolUses[0]?.text).toBe(kept[2]?.toolResults?.[0]?.text);
   });
 });
 
@@ -275,7 +351,10 @@ describe('compact', () => {
     expect(output.decisions.map((d) => d.action)).toEqual(['drop_result', 'drop_result', 'drop_result']);
     expect(output.messages).toHaveLength(messages.length);
     expect(output.stats).toMatchObject({ resultsDropped: 3, kept: 0, callsDropped: 0, pinned: 0 });
-    expect(reductionRatio(output)).toBeGreaterThan(0.75);
+    expect(reductionRatio(output)).toBeGreaterThan(0.5);
+    for (const request of seen) {
+      expect(estimateTokens(JSON.stringify(request))).toBeLessThanOrEqual(stateTokens + 150);
+    }
   });
 
   it('keeps everything without calling Jev when no tool call is a candidate', async () => {

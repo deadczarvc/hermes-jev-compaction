@@ -46,11 +46,11 @@
       "description": "Estimated token budget for state plus questions in one Jev request.",
       "default": 30000
     },
-    "charsPerToken": {
+    "truncateHeadChars": {
       "type": "number",
-      "title": "Characters per token",
-      "description": "Ratio used to estimate token counts from character counts.",
-      "default": 3.5
+      "title": "Dropped result head characters",
+      "description": "Characters of a dropped tool result kept ahead of the truncation note; 0 keeps only the note.",
+      "default": 300
     },
     "model": {
       "type": "string",
