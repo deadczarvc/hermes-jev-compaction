@@ -75,15 +75,36 @@ describe('session message mapping', () => {
       decideCall(calls[0]!, { keepCall: 0.9, keepResult: 0.1 }, { keepThreshold: 0.5 }),
       decideCall(calls[1]!, { keepCall: 0.9, keepResult: 0.9 }, { keepThreshold: 0.5 }),
     ];
-    const out = toSessionMessages(messages, applyDecisions(messages, decisions, calls));
+    messages[1]!.toolUses[0]!.text = 'x'.repeat(2000);
+    messages[2]!.toolResults![0]!.text = 'x'.repeat(2000);
+    const out = toSessionMessages(messages, applyDecisions(messages, decisions, calls, 300));
     expect(out).toHaveLength(messages.length);
     expect(out[0]).toBe(messages[0]);
     expect(out[1]?.handle).toBeUndefined();
-    expect(out[1]?.toolUses[0]?.text).toMatch(/tool result removed/);
+    expect(out[1]?.toolUses[0]?.text).toMatch(
+      new RegExp(`^${'x'.repeat(300)}\\n\\[fast-jev-compaction truncated 1700 chars`),
+    );
     expect(out[2]?.handle).toBeUndefined();
+    expect(out[2]?.toolResults?.[0]?.text).toMatch(
+      new RegExp(`^${'x'.repeat(300)}\\n\\[fast-jev-compaction truncated 1700 chars`),
+    );
     expect(out[2]?.toolResults?.[0]).toMatchObject({ tool_use_id: 'tool-1', isError: false });
     expect(out[3]).toBe(messages[3]);
     expect(out[4]).toBe(messages[4]);
+  });
+
+  it('preserves short dropped-result messages and their handles', () => {
+    const messages = transcript();
+    messages[1]!.toolUses[0]!.text = 'y'.repeat(100);
+    messages[2]!.toolResults![0]!.text = 'y'.repeat(100);
+    const calls = collectToolCalls(messages, 0);
+    const decisions = [
+      decideCall(calls[0]!, { keepCall: 0.9, keepResult: 0.1 }, { keepThreshold: 0.5 }),
+      decideCall(calls[1]!, { keepCall: 0.9, keepResult: 0.9 }, { keepThreshold: 0.5 }),
+    ];
+    const out = toSessionMessages(messages, applyDecisions(messages, decisions, calls, 300));
+    expect(out[1]).toBe(messages[1]);
+    expect(out[2]).toBe(messages[2]);
   });
 });
 

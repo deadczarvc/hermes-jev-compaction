@@ -104,6 +104,8 @@ export interface CompactOptions {
   maxRequestTokens?: number;
   /** Characters per token used for the estimates. Default 3.5. */
   charsPerToken?: number;
+  /** Characters of a dropped tool result to retain. Default 300. */
+  truncateHeadChars?: number;
 }
 
 export interface ResolvedCompactOptions {
@@ -113,6 +115,7 @@ export interface ResolvedCompactOptions {
   maxStateTokens: number;
   maxRequestTokens: number;
   charsPerToken: number;
+  truncateHeadChars: number;
 }
 
 export interface CompactResult {
