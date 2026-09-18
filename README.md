@@ -1,8 +1,7 @@
 # hermes-jev-compaction
 
 Jev-powered compaction for **[Hermes Agent](https://github.com/NousResearch/hermes-agent)**.
-A fork of [tamaratran/fast-jev-compaction](https://github.com/tamaratran/fast-jev-compaction)
-specialized for Hermes: every tool call in a session transcript is scored by the
+A Hermes-specialized fork of [tamaratran/fast-jev-compaction](https://github.com/tamaratran/fast-jev-compaction): every tool call in a session transcript is scored by the
 Jev decision model (TypeSafe System One API, `jev-1.13.0`); stale calls and
 results are dropped or truncated, everything kept stays **verbatim** — no
 lossy summaries. File paths, exact errors, and command outputs survive.
@@ -26,12 +25,12 @@ rewritten; only tool calls and results are deleted or truncated.
 |---|---|
 | `src/hermes.ts` | Bidirectional adapter: OpenAI-chat messages (`role/content/tool_calls` + `role:"tool"`) ↔ library `Message[]`. Handles nested and flat tool-call spellings, content-part arrays, grouped tool results. |
 | `bin/hermes-compact.mjs` | On-demand CLI: reads a transcript (JSON array / `{"messages":[...]}` / JSONL), runs Jev, writes the compacted transcript + stats. `--dry-run` maps without any API call. |
-| `tests/hermes.test.ts` | 9 adapter tests. Upstream suite untouched — 38/38 green. |
+| `tests/` | 9 adapter tests (TypeScript) + 18 Python engine tests. Green: 32/32 vitest, 18/18 pytest. |
 | `HERMES.md` | Integration details for Hermes users and agent-operated workflows. |
 
-The upstream Claude Code plugin (`hooks/`, `.claude-plugin/`) is kept for
-reference but is not the focus: Hermes has no compaction hook event, so the
-supported integration here is the adapter + CLI.
+Upstream's Claude Code plugin machinery (`hooks/`, `.claude-plugin/`, CC type
+stubs) has been **removed from this fork** — it cannot run in the Hermes
+contour. The originals live upstream and in this repo's git history.
 
 ## Quick start
 
@@ -67,7 +66,8 @@ const compacted = toHermes(result.messages);
 ## Tests
 
 ```bash
-npx vitest run   # 38/38: 29 upstream + 9 adapter
+npx vitest run            # 32/32 (library + adapter)
+python -m pytest tests/test_jev_engine.py   # 18/18 (Python engine)
 ```
 
 ## Hermes integration status

@@ -3,7 +3,7 @@
 I ported this library to [Hermes Agent](https://github.com/NousResearch/hermes-agent)
 (Nous Research) — an open-source personal agent with a Python core, OpenAI-chat
 message storage, and a similar lossy-summarization problem in its context
-compression. Fork: https://github.com/deadczarvc/fast-jev-compaction (see
+compression. Fork: https://github.com/deadczarvc/hermes-jev-compaction (see
 `HERMES.md` there).
 
 ## What the port adds
@@ -11,8 +11,8 @@ compression. Fork: https://github.com/deadczarvc/fast-jev-compaction (see
 - `src/hermes.ts` — a bidirectional adapter between the OpenAI-chat message
   format (what Hermes persists: `role/content/tool_calls` + `role:"tool"`
   messages) and this library's `Message[]`. Handles nested and flat tool-call
-  spellings, content-part arrays, and grouped tool results. 9 vitest tests,
-  upstream suite untouched (38/38 green in the fork).
+  spellings, content-part arrays, and grouped tool results. 9 adapter vitest tests (plus a separate 18-test Python engine suite),
+  upstream suite untouched (32/32 vitest green (plus an 18/18 Python engine suite) in the fork).
 - `bin/hermes-compact.mjs` — a CLI that reads a transcript (JSON array,
   `{"messages":[...]}`, or JSONL), runs `compact`, writes the compacted
   transcript plus stats. Runs against the real TypeSafe API; a `--dry-run`
@@ -38,7 +38,7 @@ beyond 10 calls per request and is worth documenting as a recipe.
 
 ## Sharing
 
-- Fork with the port: https://github.com/deadczarvc/fast-jev-compaction
+- Fork with the port: https://github.com/deadczarvc/hermes-jev-compaction
 - Notes for Hermes users: `HERMES.md` in the fork
 
 Happy to upstream anything useful — the adapter is MIT like the rest.

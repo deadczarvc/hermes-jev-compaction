@@ -1,6 +1,6 @@
 # hermes-jev-compaction — Jev-компакция для Hermes Agent
 
-Форк [tamaratran/fast-jev-compaction](https://github.com/tamaratran/fast-jev-compaction), специализированный под Hermes. Языки: [English](README.md) · **Русский** · [中文](HERMES.zh-CN.md)
+Hermes-специализированный форк [tamaratran/fast-jev-compaction](https://github.com/tamaratran/fast-jev-compaction). Языки: [English](README.md) · **Русский** · [中文](HERMES.zh-CN.md)
 
 Форк добавляет адаптер библиотеки fast-jev-compaction под [Hermes Agent](https://github.com/NousResearch/hermes-agent): транскрипт в формате OpenAI-chat отображается во внутренний формат `Message[]`, прогоняется через решающую модель Jev (TypeSafe System One API, `jev-1.13.0`), результат отображается обратно.
 
@@ -9,7 +9,7 @@
 ## Установка
 
 ```bash
-git clone https://github.com/deadczarvc/fast-jev-compaction
+git clone https://github.com/deadczarvc/hermes-jev-compaction
 cd fast-jev-compaction
 npm install && npm run build
 ```
@@ -57,7 +57,8 @@ const compacted = toHermes(result.messages);
 ## Тесты
 
 ```bash
-npx vitest run   # 38/38: 29 апстрим + 9 адаптерных
+npx vitest run            # 32/32
+python -m pytest tests/test_jev_engine.py   # 18/18
 ```
 
 ## Почему по требованию, а не хук

@@ -14,7 +14,7 @@ Claude Code 钩子对 Hermes 无效（Hermes 没有压缩事件；压缩逻辑�
 ## 安装
 
 ```bash
-git clone https://github.com/deadczarvc/fast-jev-compaction
+git clone https://github.com/deadczarvc/hermes-jev-compaction
 cd fast-jev-compaction
 npm install && npm run build
 ```
@@ -59,7 +59,8 @@ const compacted = toHermes(result.messages);
 ## 测试
 
 ```bash
-npx vitest run   # 38/38：上游 29 + 适配层 9
+npx vitest run            # 32/32
+python -m pytest tests/test_jev_engine.py   # 18/18
 ```
 
 ## 为什么是按需调用而不是钩子

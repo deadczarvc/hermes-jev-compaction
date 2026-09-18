@@ -14,7 +14,7 @@ port ships a **library adapter + on-demand CLI** instead.
 ## Install
 
 ```bash
-git clone https://github.com/deadczarvc/fast-jev-compaction
+git clone https://github.com/deadczarvc/hermes-jev-compaction
 cd fast-jev-compaction
 npm install && npm run build
 ```
@@ -60,7 +60,7 @@ the text mapping — tool inputs keep their full structured content.
 ## Testing
 
 ```bash
-npx vitest run   # 38/38: 29 upstream + 9 adapter tests
+npx vitest run   # 32/32 vitest + 18/18 pytest tests
 ```
 
 ## Why on-demand, not a hook
