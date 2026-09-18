@@ -1,0 +1,4 @@
+name: jev-context-engine
+version: 0.1.0
+description: "Jev compaction for Hermes: every tool call scored by the Jev decision model (TypeSafe System One API); stale calls and results dropped or truncated, everything kept stays verbatim — no lossy summaries."
+author: deadczarvc
