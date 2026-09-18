@@ -280,3 +280,50 @@ def test_should_compress_reserves_window_budget():
     # 0.95 * (1 - 0.30) = 665_000 → at 700_000 tokens it must fire
     assert eng.should_compress(700_000) is True
     assert eng.should_compress(600_000) is False
+
+
+# ---------- dynamic reservation (v0.3) ----------
+
+def test_dynamic_reservation_exact_budget():
+    """max_tokens known: trigger = threshold_percent * (context_length - max_tokens)."""
+    eng = make_engine()
+    eng.threshold_percent = 0.95
+    eng.max_tokens = 393216
+    eng.update_model(model="glm-5.3-flash", context_length=1_000_000)
+    # budget = 1M - 393216 = 606784; trigger = 606784 * 0.95 = 576444
+    assert eng.threshold_tokens == int(606784 * 0.95)
+    assert eng.should_compress(576443) is False
+    assert eng.should_compress(576444) is True
+
+
+def test_dynamic_reservation_fallback_static():
+    """max_tokens unknown (None): static 30% shrink of threshold_tokens."""
+    eng = make_engine()
+    eng.threshold_percent = 0.95
+    eng.max_tokens = None
+    eng.threshold_tokens = 1_000_000
+    assert eng._effective_trigger() == 700_000
+
+
+def test_dynamic_reservation_config_read(monkeypatch=None):
+    """register() reads agent.max_tokens from config (config path exercised via fake cfg)."""
+    cfg = {"agent": {"max_tokens": 32768}, "context": {"jev": {"model": "jev-1.13.0"}}}
+    eng = jev.JevEngine()
+    # simulate register()'s config block without touching real config
+    engine = eng
+    engine.threshold_percent = 0.95
+    engine.max_tokens = int((cfg.get("agent") or {}).get("max_tokens"))
+    engine.update_model(model="m", context_length=262144)
+    budget = 262144 - 32768
+    assert engine.threshold_tokens == int(budget * 0.95)
+
+
+def test_dynamic_reservation_zero_max_tokens_safe():
+    """max_tokens >= context_length must not produce a negative budget."""
+    eng = make_engine()
+    eng.threshold_percent = 0.95
+    eng.max_tokens = 2_000_000
+    eng.threshold_tokens = 500_000
+    eng.context_length = 1_000_000
+    # _effective_trigger falls back to static path (context_length <= max_tokens)
+    assert eng._effective_trigger() == int(500_000 * 0.70)

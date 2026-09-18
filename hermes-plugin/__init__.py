@@ -111,6 +111,7 @@ class JevEngine(ContextEngine):
         self.keep_threshold = 0.5
         self.max_state_tokens = 25_000
         self.max_request_tokens = 30_000
+        self.max_tokens: Optional[int] = None
         self._last_failure_monotonic = 0.0
         self._messages_ref: List[Dict[str, Any]] = []
         self.last_stats: Dict[str, Any] = {}
@@ -130,8 +131,34 @@ class JevEngine(ContextEngine):
         clone.keep_threshold = self.keep_threshold
         clone.max_state_tokens = self.max_state_tokens
         clone.max_request_tokens = self.max_request_tokens
+        clone.max_tokens = self.max_tokens
         clone._last_failure_monotonic = self._last_failure_monotonic
         return clone
+
+    def update_model(
+        self, model: str, context_length: int, base_url: str = "", api_key: str = "",
+        provider: str = "", api_mode: str = "",
+    ) -> None:
+        """Host call on init and model switch. super() sets threshold_tokens from the raw
+        percent; we then re-derive it with the dynamic max_tokens reservation."""
+        super().update_model(model, context_length, base_url=base_url, api_key=api_key,
+                             provider=provider, api_mode=api_mode)
+        self._refresh_reservation()
+
+    def _refresh_reservation(self) -> None:
+        """Re-read agent.max_tokens from config (the host never passes it to plugin engines);
+        recompute threshold_tokens with the exact input budget when known."""
+        if self.max_tokens is None:
+            try:
+                from hermes_cli.config import load_config_readonly
+                cfg = load_config_readonly() or {}
+                mt = (cfg.get("agent") or {}).get("max_tokens")
+                self.max_tokens = int(mt) if mt else None
+            except Exception:  # noqa: BLE001 — reservation stays static on config trouble
+                pass
+        if self.max_tokens and self.context_length > self.max_tokens:
+            budget = self.context_length - self.max_tokens
+            self.threshold_tokens = int(budget * self.threshold_percent)
 
     def update_from_response(self, usage: Dict[str, Any]) -> None:
         self.last_prompt_tokens = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
@@ -139,9 +166,19 @@ class JevEngine(ContextEngine):
         total = usage.get("total_tokens")
         self.last_total_tokens = int(total) if total else self.last_prompt_tokens + self.last_completion_tokens
 
-    # Internal reservation: max_tokens carved out of the window + vision expansion overhead
-    # (our own overflow death was 798866 input + 393216 completion > 1048576 window).
+    # Static fallback reservation (completion + vision expansion) for when the model's
+    # max_tokens is unknown. Our own overflow death: 798866 input + 393216 completion
+    # > 1048576 window — a bare percent threshold would have fired too late.
     _RESERVED_FRACTION = 0.30
+
+    def _effective_trigger(self) -> int:
+        """Trigger line in prompt-tokens. With a known max_tokens reservation the budget is
+        exact: threshold_percent * (context_length - max_tokens). Without it, fall back to
+        threshold_tokens shrunk by the static fraction."""
+        if self.max_tokens and self.context_length > self.max_tokens:
+            budget = self.context_length - self.max_tokens
+            return int(budget * self.threshold_percent)
+        return int(self.threshold_tokens * (1.0 - self._RESERVED_FRACTION))
 
     def should_compress(self, prompt_tokens: int = None) -> bool:
         if self._cooling():
@@ -149,8 +186,7 @@ class JevEngine(ContextEngine):
         tokens = prompt_tokens or self.last_prompt_tokens
         if not self.threshold_tokens:
             return False
-        effective = int(self.threshold_tokens * (1.0 - self._RESERVED_FRACTION))
-        return tokens >= effective
+        return tokens >= self._effective_trigger()
 
     def on_session_reset(self) -> None:
         self.last_prompt_tokens = 0
@@ -474,6 +510,7 @@ def register(ctx: Any) -> None:
         cfg = load_config_readonly() or {}
         compression = cfg.get("compression") or {}
         engine.threshold_percent = float(compression.get("threshold", 0.9))
+        engine.max_tokens = (cfg.get("agent") or {}).get("max_tokens") or None
         jev_cfg = (cfg.get("context") or {}).get("jev") or {}
         engine.model = jev_cfg.get("model", engine.model)
         engine.keep_threshold = float(jev_cfg.get("keep_threshold", engine.keep_threshold))
