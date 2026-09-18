@@ -28,9 +28,6 @@ rewritten; only tool calls and results are deleted or truncated.
 | `tests/` | 9 adapter tests (TypeScript) + 18 Python engine tests. Green: 32/32 vitest, 18/18 pytest. |
 | `HERMES.md` | Integration details for Hermes users and agent-operated workflows. |
 
-Upstream's Claude Code plugin machinery (`hooks/`, `.claude-plugin/`, CC type
-stubs) has been **removed from this fork** — it cannot run in the Hermes
-contour. The originals live upstream and in this repo's git history.
 
 ## Quick start
 
