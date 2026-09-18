@@ -1,6 +1,6 @@
-# Hermes port
+# hermes-jev-compaction — Hermes integration notes
 
-Languages: **English** · [Русский](HERMES.ru.md) · [中文](HERMES.zh-CN.md)
+Start with the [README](README.md). Languages: [English](README.md) · [Русский](HERMES.ru.md) · [中文](HERMES.zh-CN.md).
 
 This fork adds a Hermes Agent port of fast-jev-compaction: map an OpenAI-chat
 transcript onto the library's `Message[]`, run the Jev decision engine

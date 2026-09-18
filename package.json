@@ -1,7 +1,7 @@
 {
-  "name": "fast-jev-compaction",
+  "name": "hermes-jev-compaction",
   "version": "0.2.0",
-  "description": "Continuous, verbatim context compaction for LLM agents using TypeSafe's Jev model.",
+  "description": "Jev-powered compaction for Hermes Agent: every tool call scored by the Jev decision model (TypeSafe), stale context dropped, everything kept stays verbatim.",
   "type": "module",
   "license": "MIT",
   "engines": {

@@ -1,4 +1,6 @@
-# fast-jev-compaction 的 Hermes 移植
+# hermes-jev-compaction — 面向 Hermes Agent 的 Jev 压缩
+
+本仓库是 [tamaratran/fast-jev-compaction](https://github.com/tamaratran/fast-jev-compaction) 面向 Hermes 的专用 fork。语言：[English](README.md) · [Русский](HERMES.ru.md) · **中文**
 
 本 fork 为 [Hermes Agent](https://github.com/NousResearch/hermes-agent) 添加了
 fast-jev-compaction 库的适配层：将 OpenAI-chat 格式的会话记录映射为库内部的
@@ -8,8 +10,6 @@ fast-jev-compaction 库的适配层：将 OpenAI-chat 格式的会话记录映�
 除本移植外，未改动上游的任何内容：同一套库、同一套测试、同一套语义。上游的
 Claude Code 钩子对 Hermes 无效（Hermes 没有压缩事件；压缩逻辑位于核心）——
 因此本移植提供的是**库适配层 + 按需 CLI**。
-
-语言：[English](HERMES.md) · [Русский](HERMES.ru.md) · **中文**
 
 ## 安装
 

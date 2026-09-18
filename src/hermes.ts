@@ -1,3 +1,6 @@
+// hermes-jev-compaction — Hermes Agent adapter for fast-jev-compaction.
+// Maps OpenAI-chat transcripts (Hermes session format) onto the library's
+// Message[] so the Jev decision engine can score Hermes tool calls.
 import type { Message, ToolResult, ToolUse } from './types.js';
 
 /**

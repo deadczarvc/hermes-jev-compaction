@@ -1,10 +1,10 @@
-# Порт fast-jev-compaction для Hermes Agent
+# hermes-jev-compaction — Jev-компакция для Hermes Agent
+
+Форк [tamaratran/fast-jev-compaction](https://github.com/tamaratran/fast-jev-compaction), специализированный под Hermes. Языки: [English](README.md) · **Русский** · [中文](HERMES.zh-CN.md)
 
 Форк добавляет адаптер библиотеки fast-jev-compaction под [Hermes Agent](https://github.com/NousResearch/hermes-agent): транскрипт в формате OpenAI-chat отображается во внутренний формат `Message[]`, прогоняется через решающую модель Jev (TypeSafe System One API, `jev-1.13.0`), результат отображается обратно.
 
 Больше ничего из апстрима не менялось: та же библиотека, те же тесты, та же семантика. Хуки апстрима под Claude Code для Hermes бесполезны (в Hermes нет события компакции; сжатие живёт в ядре) — поэтому порт поставляется как **адаптер-библиотека + CLI по требованию**.
-
-Языки: [English](HERMES.md) · **Русский** · [中文](HERMES.zh-CN.md)
 
 ## Установка
 

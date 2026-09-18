@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 // hermes-compact — on-demand Jev compaction for Hermes Agent transcripts.
+// Part of hermes-jev-compaction (https://github.com/deadczarvc/hermes-jev-compaction).
 //
 // Reads an OpenAI-chat-format transcript (JSON array of messages, or an
 // object with a `messages` array; JSONL also accepted), compacts it with the
