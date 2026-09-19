@@ -77,5 +77,10 @@ in-session without core patches. See `HERMES.md` for the running notes.
 
 ## Credits & license
 
+Thanks to [@MaximkaE](https://t.me/MaximkaE) for spotting three issues in the
+Hermes adapter (system-message loss, receipt-data truncation, tool-input
+privacy gap) — fixed in v0.3.2.
+
+
 Library and Claude Code plugin by the upstream authors (MIT). Hermes adapter,
 CLI, and docs in this fork: MIT.
