@@ -28,6 +28,8 @@ export interface HermesTranscript {
   messages: Message[];
   /** System texts, kept out of the compactable transcript; pass them as `goal`. */
   systemTexts: string[];
+  /** Original system messages (verbatim), for toHermes to restore. */
+  systemEntries: HermesMessage[];
 }
 
 function contentText(content: unknown): string {
@@ -73,13 +75,21 @@ function callArguments(call: HermesToolCall): unknown {
  * Tool messages whose `tool_call_id` is missing or unmatched stay untouched
  * (the library never drops unpaired calls).
  */
-export function fromHermes(messages: readonly HermesMessage[]): HermesTranscript {
+export interface FromHermesOptions {
+  /** Keep non-text content parts (e.g. images) as opaque passthrough entries. Default false. */
+  keepNonTextParts?: boolean;
+}
+
+export function fromHermes(messages: readonly HermesMessage[], options?: FromHermesOptions): HermesTranscript {
   const out: Message[] = [];
   const systemTexts: string[] = [];
+  const systemEntries: HermesMessage[] = [];
+  const keepParts = options?.keepNonTextParts ?? false;
   for (const message of messages) {
     if (message.role === 'system') {
       const text = contentText(message.content);
       if (text) systemTexts.push(text);
+      systemEntries.push(message);  // verbatim, restored by toHermes
       continue;
     }
     if (message.role === 'tool') {
@@ -109,7 +119,7 @@ export function fromHermes(messages: readonly HermesMessage[]): HermesTranscript
     }));
     out.push({ role, text: contentText(message.content), toolUses });
   }
-  return { messages: out, systemTexts };
+  return { messages: out, systemTexts, systemEntries };
 }
 
 /**
@@ -119,8 +129,11 @@ export function fromHermes(messages: readonly HermesMessage[]): HermesTranscript
  * messages in transcript order, followed by any user text of the same
  * message. Empty assistant messages are dropped.
  */
-export function toHermes(messages: readonly Message[]): HermesMessage[] {
-  const out: HermesMessage[] = [];
+export function toHermes(
+  messages: readonly Message[],
+  systemEntries?: readonly HermesMessage[],
+): HermesMessage[] {
+  const out: HermesMessage[] = [...(systemEntries ?? [])];
   for (const message of messages) {
     const hasTools = message.toolUses.length > 0;
     const hasResults = (message.toolResults ?? []).length > 0;

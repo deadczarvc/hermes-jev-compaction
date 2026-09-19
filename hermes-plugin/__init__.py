@@ -530,18 +530,34 @@ class JevEngine(ContextEngine):
             out.append(msg)
         return out
 
+    # Receipt markers: losing a confirmation id is worse than keeping the bulk.
+    _RECEIPT_RE = re.compile(
+        r"\b(?:id|message_id|commit|sha|hash|ticket|confirm(?:ed)?|sent|delivered|"
+        r"created|updated|deleted|order|transaction)\b[\s:=]*[\w\-]+", re.IGNORECASE)
+
     def _fallback_prune(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Deterministic degrade when Jev is unreachable: truncate old unprotected results only."""
+        """Deterministic degrade when Jev is unreachable. Old unprotected results are
+        truncated head+tail (tail kept: confirmations live at the end); results matching
+        receipt markers are never truncated — non-idempotent tools can't be re-run."""
         out: List[Dict[str, Any]] = []
         threshold_idx = max(0, len(messages) - self.protect_last_n)
         for idx, msg in enumerate(messages):
             if msg.get("role") == "tool" and idx != 0 and idx < threshold_idx:
                 text = _content_text(msg.get("content"))
                 if len(text) > TRUNCATE_HEAD_CHARS + 120:
-                    msg = dict(msg, content=(
-                        text[:TRUNCATE_HEAD_CHARS]
-                        + f"\n[jev fallback truncated {len(text) - TRUNCATE_HEAD_CHARS} chars; "
-                          f"re-run the tool if needed]"))
+                    if self._RECEIPT_RE.search(text):
+                        # Keep tail (confirmations) + head marker, drop the bulky middle.
+                        keep = TRUNCATE_HEAD_CHARS // 2
+                        msg = dict(msg, content=(
+                            text[:keep]
+                            + f"\n[jev fallback: {len(text) - keep - keep} middle chars truncated; "
+                              f"receipt markers preserved]\n"
+                            + text[-keep:]))
+                    else:
+                        msg = dict(msg, content=(
+                            text[:TRUNCATE_HEAD_CHARS]
+                            + f"\n[jev fallback truncated {len(text) - TRUNCATE_HEAD_CHARS} chars; "
+                              f"re-run the tool if needed]"))
             out.append(msg)
         return out
 
