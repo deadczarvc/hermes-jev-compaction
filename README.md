@@ -75,6 +75,13 @@ Hermes **context engine plugin** (Hermes exposes a `ContextEngine`
 extension point, `context.engine` in config.yaml), so compaction runs
 in-session without core patches. See `HERMES.md` for the running notes.
 
+## Threshold calibration
+
+See [docs/threshold-analysis.md](docs/threshold-analysis.md) for the mathematical
+model behind `keep_threshold: 0.5` — flip-rate measurements across 5 tool
+fixtures × 5 repeats, and a 250-tool context-loss simulation at various
+thresholds.
+
 ## Credits & license
 
 Thanks to [@MaximkaE](https://t.me/MaximkaE) for spotting three issues in the
