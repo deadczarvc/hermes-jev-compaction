@@ -345,10 +345,11 @@ def test_live_config_surface_attrs_present():
     """Live-config apply runs on an INITIALIZED engine (after host update_model)."""
     eng = make_engine()
     eng.update_model(model="m", context_length=1_000_000)
-    for attr in ("model_thresholds", "_config_context_length", "_resolved_context_length",
+    for attr in ("model_thresholds", "_resolved_context_length",
                  "threshold_tokens_cap", "_threshold_tokens", "_tail_token_budget",
                  "threshold_percent", "summary_target_ratio",
                  "_coerce_threshold_tokens_cap", "_coerce_max_tokens"):
+        # _config_context_length is optional: live-config reads it via getattr(None-default)
         assert hasattr(eng, attr), f"missing {attr} — live-config apply would crash"
 
 
