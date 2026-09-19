@@ -327,3 +327,40 @@ def test_dynamic_reservation_zero_max_tokens_safe():
     eng.context_length = 1_000_000
     # _effective_trigger falls back to static path (context_length <= max_tokens)
     assert eng._effective_trigger() == int(500_000 * 0.70)
+
+
+# ---------- host live-config contract (v0.3.1) ----------
+
+def test_coerce_methods_exist_and_behave():
+    """tui_gateway live-config pokes these; missing = AttributeError = fallback to builtin."""
+    eng = make_engine()
+    assert eng._coerce_threshold_tokens_cap(500) == 500
+    assert eng._coerce_threshold_tokens_cap(0) is None
+    assert eng._coerce_threshold_tokens_cap(None) is None
+    assert eng._coerce_threshold_tokens_cap("garbage") is None
+    assert eng._coerce_max_tokens("16384") == 16384
+
+
+def test_live_config_surface_attrs_present():
+    """Live-config apply runs on an INITIALIZED engine (after host update_model)."""
+    eng = make_engine()
+    eng.update_model(model="m", context_length=1_000_000)
+    for attr in ("model_thresholds", "_config_context_length", "_resolved_context_length",
+                 "threshold_tokens_cap", "_threshold_tokens", "_tail_token_budget",
+                 "threshold_percent", "summary_target_ratio",
+                 "_coerce_threshold_tokens_cap", "_coerce_max_tokens"):
+        assert hasattr(eng, attr), f"missing {attr} — live-config apply would crash"
+
+
+def test_threshold_tokens_cap_bounds_trigger():
+    eng = make_engine()
+    eng.threshold_percent = 0.95
+    eng.max_tokens = 32768
+    eng.update_model(model="m", context_length=1_000_000)
+    base = eng.threshold_tokens
+    eng.threshold_tokens_cap = 500_000
+    eng._refresh_reservation()
+    assert eng.threshold_tokens == 500_000, "cap must lower the trigger"
+    eng.threshold_tokens_cap = 2_000_000
+    eng._refresh_reservation()
+    assert eng.threshold_tokens == int((1_000_000 - 32768) * 0.95), "higher cap is a no-op"

@@ -112,6 +112,12 @@ class JevEngine(ContextEngine):
         self.max_state_tokens = 25_000
         self.max_request_tokens = 30_000
         self.max_tokens: Optional[int] = None
+        # Host live-config contract surface (tui_gateway/session_compression.py pokes these
+        # in place on every compression.* config change; built-in names kept 1:1).
+        self.model_thresholds: dict = {}
+        self.threshold_tokens_cap: int | None = None
+        self.tail_mode: str = "ratio"
+        self.summary_target_ratio: float = 0.25
         self._last_failure_monotonic = 0.0
         self._messages_ref: List[Dict[str, Any]] = []
         self.last_stats: Dict[str, Any] = {}
@@ -134,6 +140,24 @@ class JevEngine(ContextEngine):
         clone.max_tokens = self.max_tokens
         clone._last_failure_monotonic = self._last_failure_monotonic
         return clone
+
+    @staticmethod
+    def _coerce_threshold_tokens_cap(value: object) -> int | None:
+        """Host live-config contract (tui_gateway/session_compression.py calls this on any
+        engine when compression.* changes). A cap is a positive int, or None for "no cap"."""
+        try:
+            ivalue = int(value) if value is not None else 0
+        except (TypeError, ValueError):
+            return None
+        return ivalue if ivalue > 0 else None
+
+    @staticmethod
+    def _coerce_max_tokens(value: object) -> int | None:
+        try:
+            ivalue = int(value) if value is not None else 0
+        except (TypeError, ValueError):
+            return None
+        return ivalue if ivalue > 0 else None
 
     def update_model(
         self, model: str, context_length: int, base_url: str = "", api_key: str = "",
@@ -159,6 +183,9 @@ class JevEngine(ContextEngine):
         if self.max_tokens and self.context_length > self.max_tokens:
             budget = self.context_length - self.max_tokens
             self.threshold_tokens = int(budget * self.threshold_percent)
+        # Live-config cap (host sets threshold_tokens_cap via _coerce_threshold_tokens_cap)
+        if self.threshold_tokens_cap:
+            self.threshold_tokens = min(self.threshold_tokens, self.threshold_tokens_cap)
 
     def update_from_response(self, usage: Dict[str, Any]) -> None:
         self.last_prompt_tokens = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
