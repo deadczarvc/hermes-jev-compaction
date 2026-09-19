@@ -73,14 +73,18 @@ def test_all_keep_returns_same_objects():
     assert eng.last_stats["mode"] == "jev" and eng.last_stats["kept"] >= 1
 
 
-def test_drop_call_removes_pair_and_empty_assistant():
+def test_drop_call_blanks_payload_preserves_row():
+    """Index-safe: dropped tool results become stubs (same length); empty assistants stripped."""
     eng = make_engine()
     msgs = transcript(n_calls=2)
     patch_ask(eng, FakeAnswers(lambda c: "drop_call"))
     out = eng.compress(msgs)
-    assert not [m for m in out if m.get("role") == "tool"], "dropped tool results must disappear"
-    assert not any(m.get("tool_calls") for m in out if m.get("role") == "assistant")
+    tools = [m for m in out if m.get("role") == "tool"]
+    assert all(m["content"] == "[dropped by jev-compaction: judged no longer relevant]" for m in tools)
+    assert all(not m.get("tool_calls") for m in out if m.get("role") == "assistant")
     assert out[0]["role"] == "system" and out[-1]["content"] == "Summarize the results."
+    # Index safety: same number of rows in, same number out (for this fixture)
+    assert len(out) == len(msgs)
 
 
 def test_drop_result_truncates_but_keeps_row():
@@ -98,8 +102,11 @@ def test_mixed_decisions_partition():
     msgs = transcript(n_calls=3)
     patch_ask(eng, FakeAnswers(lambda c: {"t1": "keep", "t2": "drop_result", "t3": "drop_call"}[c["id"]]))
     tools = [m for m in eng.compress(msgs) if m.get("role") == "tool"]
-    assert len(tools) == 2
-    assert sum("jev truncated" in m["content"] for m in tools) == 1
+    assert len(tools) == 3, "index-safe: all tool rows preserved"
+    kept = [m for m in tools if "jev" not in m["content"]]
+    truncated = [m for m in tools if "jev truncated" in m["content"]]
+    dropped = [m for m in tools if "dropped by jev-compaction" in m["content"]]
+    assert len(kept) == 1 and len(truncated) == 1 and len(dropped) == 1
 
 
 # ---------- negative controls ----------

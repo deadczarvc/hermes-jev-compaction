@@ -507,6 +507,10 @@ class JevEngine(ContextEngine):
             if role == "tool":
                 tc_id = msg.get("tool_call_id")
                 if tc_id in dropped:
+                    # Keep the row (Hermes indexes messages by position after the seam);
+                    # blank the payload so the provider ignores it.
+                    out.append({"role": "tool", "tool_call_id": tc_id,
+                                "content": "[dropped by jev-compaction: judged no longer relevant]"})
                     continue
                 if action_by_tool_call_id.get(tc_id) == "drop_result":
                     text = _content_text(msg.get("content"))
@@ -520,8 +524,9 @@ class JevEngine(ContextEngine):
             if role == "assistant" and msg.get("tool_calls"):
                 kept_calls = [tc for tc in msg["tool_calls"] if tc.get("id") not in dropped]
                 if not kept_calls:
-                    if _content_text(msg.get("content")).strip():
-                        out.append(dict(msg, tool_calls=None))
+                    # Keep the row (host may index); strip tool_calls and content.
+                    out.append({"role": "assistant", "content": "",
+                                "tool_calls": None})
                     continue
                 if len(kept_calls) != len(msg["tool_calls"]):
                     msg = dict(msg, tool_calls=kept_calls)
