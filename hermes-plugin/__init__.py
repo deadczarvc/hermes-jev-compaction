@@ -118,6 +118,11 @@ class JevEngine(ContextEngine):
         self.threshold_tokens_cap: int | None = None
         self.tail_mode: str = "ratio"
         self.summary_target_ratio: float = 0.25
+        self._configured_threshold_percent: float | None = None
+        self._config_context_length: int | None = None
+        self._resolved_context_length: int | None = None
+        self._threshold_tokens: int | None = None
+        self._tail_token_budget: int | None = None
         self._last_failure_monotonic = 0.0
         self._messages_ref: List[Dict[str, Any]] = []
         self.last_stats: Dict[str, Any] = {}
