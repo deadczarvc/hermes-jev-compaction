@@ -88,6 +88,11 @@ Thanks to [@MaximkaE](https://t.me/MaximkaE) for spotting three issues in the
 Hermes adapter (system-message loss, receipt-data truncation, tool-input
 privacy gap) — fixed in v0.3.2.
 
+Thanks to [litshing](https://github.com/litshing) for the
+[usage envelope](https://github.com/litshing/jevcore/blob/main/docs/specs/2026-09-19-jev-usage-envelope.md)
+defining where Jev judgements are safe to use, and for identifying the
+IndexError invariant (Hermes captures message count before the prune seam).
+
 
 Library and Claude Code plugin by the upstream authors (MIT). Hermes adapter,
 CLI, and docs in this fork: MIT.
