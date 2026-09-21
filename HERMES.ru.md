@@ -57,8 +57,8 @@ const compacted = toHermes(result.messages);
 ## Тесты
 
 ```bash
-npx vitest run            # 32/32
-python -m pytest tests/test_jev_engine.py   # 18/18
+npx vitest run            # 41/41
+python -m pytest tests/   # 69/69
 ```
 
 ## Почему по требованию, а не хук

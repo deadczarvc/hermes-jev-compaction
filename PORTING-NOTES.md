@@ -11,8 +11,8 @@ compression. Fork: https://github.com/deadczarvc/hermes-jev-compaction (see
 - `src/hermes.ts` — a bidirectional adapter between the OpenAI-chat message
   format (what Hermes persists: `role/content/tool_calls` + `role:"tool"`
   messages) and this library's `Message[]`. Handles nested and flat tool-call
-  spellings, content-part arrays, and grouped tool results. 9 adapter vitest tests (plus a separate 18-test Python engine suite),
-  upstream suite untouched (32/32 vitest green (plus an 18/18 Python engine suite) in the fork).
+  spellings, content-part arrays, and grouped tool results. 9 adapter vitest tests (plus a 69-test Python engine suite),
+  upstream suite untouched (41/41 vitest green (plus a 69/69 Python engine suite) in the fork).
 - `bin/hermes-compact.mjs` — a CLI that reads a transcript (JSON array,
   `{"messages":[...]}`, or JSONL), runs `compact`, writes the compacted
   transcript plus stats. Runs against the real TypeSafe API; a `--dry-run`

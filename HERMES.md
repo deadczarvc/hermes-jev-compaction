@@ -60,7 +60,7 @@ the text mapping — tool inputs keep their full structured content.
 ## Testing
 
 ```bash
-npx vitest run   # 32/32 vitest + 18/18 pytest tests
+npx vitest run   # 41/41 vitest + 69/69 pytest tests
 ```
 
 ## Why on-demand, not a hook
