@@ -61,7 +61,6 @@ def test_session_clone_keeps_policy_but_not_session_state(plugin: ModuleType) ->
         "model", "egress_mode", "threshold_percent", "threshold_tokens_cap",
         "protect_first_n", "protect_last_n", "model_thresholds", "max_tokens",
         "keep_threshold", "max_state_tokens", "max_request_tokens", "tail_mode",
-        "summary_target_ratio",
     ):
         assert getattr(clone, name) == getattr(parent, name), name
     assert clone.model_thresholds is not parent.model_thresholds

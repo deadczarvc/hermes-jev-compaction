@@ -128,11 +128,16 @@ class JevEngine(EngineSettings):
     def _effective_trigger(self) -> int:
         """Trigger line in prompt-tokens. With a known max_tokens reservation the budget is
         exact: threshold_percent * (context_length - max_tokens). Without it, fall back to
-        threshold_tokens shrunk by the static fraction."""
+        threshold_tokens shrunk by the static fraction. Either way, an explicit
+        threshold_tokens_cap clamps the result."""
         if self.max_tokens and self.context_length > self.max_tokens:
             budget = self.context_length - self.max_tokens
-            return int(budget * self.threshold_percent)
-        return int(self.threshold_tokens * (1.0 - self._RESERVED_FRACTION))
+            result = int(budget * self.threshold_percent)
+        else:
+            result = int(self.threshold_tokens * (1.0 - self._RESERVED_FRACTION))
+        if self.threshold_tokens_cap:
+            result = min(result, self.threshold_tokens_cap)
+        return result
 
     def should_compress(self, prompt_tokens: int = None) -> bool:
         if self._cooling():

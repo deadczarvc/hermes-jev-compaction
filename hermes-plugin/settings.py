@@ -23,7 +23,7 @@ _POLICY_FIELDS = (
     "model", "base_url", "keep_threshold", "max_state_tokens", "max_request_tokens",
     "max_tokens", "egress_mode", "model_thresholds", "threshold_percent",
     "threshold_tokens_cap", "protect_first_n", "protect_last_n", "tail_mode",
-    "summary_target_ratio", "emit_automatic_compaction_status",
+    "emit_automatic_compaction_status",
     "_config_threshold_percent", "_configured_threshold_percent", "_config_context_length",
 )
 
@@ -43,7 +43,6 @@ class EngineSettings(ContextEngine):
         self.model_thresholds: dict[str, float] = {}
         self.threshold_tokens_cap: int | None = None
         self.tail_mode = "ratio"
-        self.summary_target_ratio = 0.25
         self._configured_threshold_percent: float | None = None
         self._config_context_length: int | None = None
         self._resolved_context_length: int | None = None
