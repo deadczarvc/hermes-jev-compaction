@@ -153,6 +153,8 @@ class JevEngine(EngineSettings):
         focus_topic: Optional[str] = None, force: bool = False, memory_context: str = "",
         bypass_cooldown: bool = False,
     ) -> List[Dict[str, Any]]:
+        if not isinstance(messages, list):
+            return messages
         self.compression_count += 1
         self._messages_ref = messages
         self._memory_context = (memory_context or "").strip()[:2000]
