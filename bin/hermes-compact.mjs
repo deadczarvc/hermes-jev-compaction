@@ -103,7 +103,8 @@ const { opts, positional } = parseArgs(process.argv.slice(2));
 if (positional.length !== 1) usage(2);
 
 const hermesMessages = loadTranscript(positional[0]);
-const { messages, systemTexts, systemEntries } = fromHermes(hermesMessages);
+const transcript = fromHermes(hermesMessages);
+const { messages, systemTexts } = transcript;
 const goal = hermesGoal(systemTexts, opts.goal);
 
 if (opts.dryRun) {
@@ -117,7 +118,7 @@ if (opts.dryRun) {
     candidates: calls.filter((call) => !call.pinned).length,
     pinned: calls.filter((call) => call.pinned).length,
   };
-  const payload = JSON.stringify({ messages: toHermes(messages, systemEntries), stats }, null, 2);
+  const payload = JSON.stringify({ messages: toHermes(messages, transcript), stats }, null, 2);
   if (opts.out) writeFileSync(opts.out, payload);
   else console.log(payload);
   console.error(`dry-run: ${stats.toolCalls} tool calls, ${stats.candidates} candidates, ${stats.pinned} pinned`);
@@ -141,7 +142,7 @@ try {
     maxRequestTokens: opts.maxRequestTokens,
     truncateHeadChars: opts.truncateHeadChars,
   });
-  const payload = JSON.stringify({ messages: toHermes(result.messages, systemEntries), stats: result.stats }, null, 2);
+  const payload = JSON.stringify({ messages: toHermes(result.messages, transcript), stats: result.stats }, null, 2);
   if (opts.out) writeFileSync(opts.out, payload);
   else console.log(payload);
   const s = result.stats;

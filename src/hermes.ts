@@ -12,9 +12,10 @@ import type { Message, ToolResult, ToolUse } from './types.js';
 export interface HermesToolCall {
   id?: string;
   type?: string;
-  function?: { name?: string; arguments?: string };
+  function?: { name?: string; arguments?: string; [key: string]: unknown };
   name?: string;
   arguments?: string;
+  [key: string]: unknown;
 }
 
 export interface HermesMessage {
@@ -22,6 +23,8 @@ export interface HermesMessage {
   content: unknown;
   tool_calls?: HermesToolCall[];
   tool_call_id?: string;
+  error?: boolean;
+  [key: string]: unknown;
 }
 
 export interface HermesTranscript {
@@ -30,6 +33,8 @@ export interface HermesTranscript {
   systemTexts: string[];
   /** Original system messages (verbatim), for toHermes to restore. */
   systemEntries: HermesMessage[];
+  /** Complete native input, in its original order. Required for lossless output. */
+  sourceMessages: readonly HermesMessage[];
 }
 
 function contentText(content: unknown): string {
@@ -69,22 +74,15 @@ function callArguments(call: HermesToolCall): unknown {
 }
 
 /**
- * Maps an OpenAI-chat transcript onto the library's `Message[]`.
- * Consecutive `tool` messages are grouped into one user message carrying
- * `toolResults`, mirroring the pairing the library expects by `tool_use_id`.
- * Tool messages whose `tool_call_id` is missing or unmatched stay untouched
- * (the library never drops unpaired calls).
+ * Maps an OpenAI-chat transcript onto the compactable `Message[]` projection.
+ * The projection is deliberately text-only for scoring. `sourceMessages` is
+ * always retained verbatim and is the only source used to serialize output,
+ * so non-text parts and provider-specific fields are never reconstructed.
  */
-export interface FromHermesOptions {
-  /** Keep non-text content parts (e.g. images) as opaque passthrough entries. Default false. */
-  keepNonTextParts?: boolean;
-}
-
-export function fromHermes(messages: readonly HermesMessage[], options?: FromHermesOptions): HermesTranscript {
+export function fromHermes(messages: readonly HermesMessage[]): HermesTranscript {
   const out: Message[] = [];
   const systemTexts: string[] = [];
   const systemEntries: HermesMessage[] = [];
-  const keepParts = options?.keepNonTextParts ?? false;
   for (const message of messages) {
     if (message.role === 'system') {
       const text = contentText(message.content);
@@ -97,6 +95,7 @@ export function fromHermes(messages: readonly HermesMessage[], options?: FromHer
         tool_use_id: message.tool_call_id ?? '',
         text: contentText(message.content),
       };
+      if (message.error === true) result.isError = true;
       const previous = out[out.length - 1];
       if (
         previous &&
@@ -119,20 +118,94 @@ export function fromHermes(messages: readonly HermesMessage[], options?: FromHer
     }));
     out.push({ role, text: contentText(message.content), toolUses });
   }
-  return { messages: out, systemTexts, systemEntries };
+  return { messages: out, systemTexts, systemEntries, sourceMessages: messages };
+}
+
+function isTranscript(value: readonly HermesMessage[] | HermesTranscript): value is HermesTranscript {
+  return !Array.isArray(value);
+}
+
+function sourceAwareToHermes(
+  compacted: readonly Message[],
+  transcript: HermesTranscript,
+): HermesMessage[] {
+  const calls = new Set<string>();
+  const results = new Map<string, string>();
+  for (const message of compacted) {
+    for (const tool of message.toolUses) calls.add(tool.tool_use_id);
+    for (const result of message.toolResults ?? []) results.set(result.tool_use_id, result.text);
+  }
+
+  const callSources = new Map<string, number[]>();
+  const resultSources = new Map<string, number[]>();
+  transcript.sourceMessages.forEach((message, index) => {
+    if (message.role === 'assistant') {
+      for (const call of message.tool_calls ?? []) {
+        if (!call.id) continue;
+        const source = callSources.get(call.id) ?? [];
+        source.push(index);
+        callSources.set(call.id, source);
+      }
+    }
+    if (message.role === 'tool' && message.tool_call_id) {
+      const source = resultSources.get(message.tool_call_id) ?? [];
+      source.push(index);
+      resultSources.set(message.tool_call_id, source);
+    }
+  });
+
+  const droppedCalls = new Set<string>();
+  const changedResults = new Map<number, string>();
+  const droppedResults = new Set<number>();
+  for (const [id, sources] of callSources) {
+    const resultSource = resultSources.get(id);
+    // Only a unique native pair is mutable. Missing or duplicate IDs have no
+    // trustworthy source record, so preserve them rather than guessing.
+    if (sources.length !== 1 || resultSource?.length !== 1) continue;
+    const resultIndex = resultSource[0]!;
+    if (!calls.has(id)) {
+      droppedCalls.add(id);
+      droppedResults.add(resultIndex);
+      continue;
+    }
+    const nextText = results.get(id);
+    const original = transcript.sourceMessages[resultIndex]!;
+    if (nextText !== undefined && nextText !== contentText(original.content)) {
+      changedResults.set(resultIndex, nextText);
+    }
+  }
+
+  const output: HermesMessage[] = [];
+  transcript.sourceMessages.forEach((message, index) => {
+    if (droppedResults.has(index)) return;
+    if (message.role === 'assistant' && message.tool_calls?.some((call) => call.id && droppedCalls.has(call.id))) {
+      // Retain the exact source record and remove only calls explicitly dropped.
+      // This avoids erasing opaque assistant fields or non-text content.
+      const tool_calls = message.tool_calls.filter((call) => !call.id || !droppedCalls.has(call.id));
+      const copy: HermesMessage = { ...message };
+      if (tool_calls.length > 0) copy.tool_calls = tool_calls;
+      else delete copy.tool_calls;
+      output.push(copy);
+      return;
+    }
+    const replacement = changedResults.get(index);
+    output.push(replacement === undefined ? message : { ...message, content: replacement });
+  });
+  return output;
 }
 
 /**
- * Inverse of `fromHermes`. Untouched assistant messages keep their original
- * tool call objects wherever the library returned them unchanged; rebuilt
- * calls are re-serialized from the parsed input. Tool results become `tool`
- * messages in transcript order, followed by any user text of the same
- * message. Empty assistant messages are dropped.
+ * Applies a compaction projection to native Hermes records. Passing the full
+ * `HermesTranscript` is lossless: untouched records retain their exact native
+ * structure and order, while a matched decision changes only its source call
+ * or result. The array overload remains for legacy callers without a source.
  */
 export function toHermes(
   messages: readonly Message[],
-  systemEntries?: readonly HermesMessage[],
+  source?: readonly HermesMessage[] | HermesTranscript,
 ): HermesMessage[] {
+  if (source && isTranscript(source)) return sourceAwareToHermes(messages, source);
+  const systemEntries = source;
   const out: HermesMessage[] = [...(systemEntries ?? [])];
   for (const message of messages) {
     const hasTools = message.toolUses.length > 0;
