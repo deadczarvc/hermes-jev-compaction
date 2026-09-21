@@ -422,10 +422,21 @@ class JevEngine(EngineSettings):
                 if action_by_tool_call_id.get(tc_id) == "drop_result":
                     text = _content_text(msg.get("content"))
                     if len(text) > TRUNCATE_HEAD_CHARS + 120:
-                        msg = dict(msg, content=(
-                            text[:TRUNCATE_HEAD_CHARS]
-                            + f"\n[jev truncated {len(text) - TRUNCATE_HEAD_CHARS} chars of this tool result; "
-                              f"re-run the tool if needed]"))
+                        if self._RECEIPT_RE.search(text):
+                            # Receipt (confirmation ID) lives deeper than the kept
+                            # head — keep head + tail so non-idempotent tool
+                            # confirmations survive compaction.
+                            keep = TRUNCATE_HEAD_CHARS // 2
+                            msg = dict(msg, content=(
+                                text[:keep]
+                                + f"\n[jev truncated {len(text) - keep - keep} middle chars; "
+                                  f"receipt markers preserved]\n"
+                                + text[-keep:]))
+                        else:
+                            msg = dict(msg, content=(
+                                text[:TRUNCATE_HEAD_CHARS]
+                                + f"\n[jev truncated {len(text) - TRUNCATE_HEAD_CHARS} chars of this tool result; "
+                                  f"re-run the tool if needed]"))
                 out.append(msg)
                 continue
             if role == "assistant" and msg.get("tool_calls"):
