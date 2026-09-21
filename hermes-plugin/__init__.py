@@ -151,6 +151,8 @@ class JevEngine(EngineSettings):
         self.compression_count += 1
         self._messages_ref = messages
         self._memory_context = (memory_context or "").strip()[:2000]
+        self._events = getattr(self, "_events", [])[-100:]
+        self._events.append({"phase": "attempt", "ts": time.monotonic()})
         stats: Dict[str, Any] = {"calls": 0, "candidates": 0, "mode": "jev"}
         self.last_stats = stats
         if self.egress_mode == "off":
@@ -170,6 +172,7 @@ class JevEngine(EngineSettings):
         except Exception:  # noqa: BLE001 — fail-open preserves original
             stats["mode"] = "preserve"
             stats["error"] = "egress or Jev failure"
+            self._events.append({"phase": "preserve", "reason": "transport_error"})
             self._last_failure_monotonic = time.monotonic()
             return messages  # fail-open: Jev failure never mutates history
         by_id = {}
@@ -201,6 +204,9 @@ class JevEngine(EngineSettings):
             "calls_dropped": sum(1 for d in by_id.values() if d == "drop_call"),
             "state_tokens": state_tokens,
         })
+        self._events.append({"phase": "committed",
+                             "kept": stats.get("kept", 0),
+                             "dropped": stats.get("calls_dropped", 0)})
         return out
 
     # -- internals ---------------------------------------------------------

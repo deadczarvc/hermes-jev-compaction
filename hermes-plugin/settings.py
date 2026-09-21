@@ -107,6 +107,7 @@ class EngineSettings(ContextEngine):
             "last_stats": copy.deepcopy(self.last_stats),
             "session_settings": json.loads(self._session_settings_json) if self._session_settings_json is not None else None,
             "dropped_recent": copy.deepcopy(dropped),
+            "session_events": copy.deepcopy(getattr(self, "_events", [])[-20:]),
         }
 
     def _cooling(self) -> bool:
