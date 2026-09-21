@@ -429,7 +429,7 @@ def test_egress_full_text_passes_text():
     eng.compress(msgs)
     # transcript(n_calls=1) has user text "read file" at index 1
     assert "Summarize the results." in json.dumps(captured["state"], ensure_ascii=False),         "full_text mode must include user text in state"
-    assert "output 0" in json.dumps(captured["state"], ensure_ascii=False),         "full_text mode must include tool result in state"
+    assert "output 0" not in json.dumps(captured["state"], ensure_ascii=False),         "full_text mode must omit raw tool results"
 
 
 def test_egress_metadata_no_memory_context_leak():

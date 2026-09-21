@@ -26,12 +26,12 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import re
 import time
 import urllib.request
 from typing import Any, Dict, List, Optional, Tuple
 
+from .egress import metadata_input, redact_export_value
 from .settings import DEFAULT_MODEL as DEFAULT_MODEL
 from .settings import FAILURE_BACKOFF_S as FAILURE_BACKOFF_S
 from .settings import SYSTEM_ONE_URL as SYSTEM_ONE_URL
@@ -56,7 +56,6 @@ _IDENTIFIER_RE = re.compile(
     r"|\b[0-9a-f]{8,}\b",
     re.IGNORECASE)
 
-
 def estimate_tokens(text: str) -> int:
     """Tokenizer-free estimate: 1 token per 6 letters, 0.5 per digit, 0.9 per symbol."""
     tokens = 0.0
@@ -71,14 +70,12 @@ def estimate_tokens(text: str) -> int:
             tokens += 0.9
     return int(tokens) + 1
 
-
 def _content_text(content: Any) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
         return "".join(p.get("text", "") for p in content if isinstance(p, dict))
     return ""
-
 
 def _parse_input(raw: Any) -> Any:
     if isinstance(raw, (dict, list)):
@@ -93,16 +90,13 @@ def _parse_input(raw: Any) -> Any:
         return {"raw": raw}
     return {}
 
-
 def _truncate(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: max(0, limit - 1)] + "…"
-
 
 def _abridge(text: str, head: int, tail: int) -> str:
     if len(text) <= head + tail + 40:
         return text
     return f"{text[:head]}\n[… {len(text) - head - tail} chars omitted …]\n{text[-tail:]}"
-
 
 def _http_post_json(url: str, body: bytes, headers: Dict[str, str], timeout: float) -> Dict[str, Any]:
     """POST JSON to an http(s) URL only; anything else is refused before any I/O."""
@@ -112,16 +106,13 @@ def _http_post_json(url: str, body: bytes, headers: Dict[str, str], timeout: flo
     with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 — scheme-guarded above
         return json.loads(resp.read())
 
-
 class JevEngine(EngineSettings):
     """Verbatim-keep compaction: Jev decides, nothing is summarized."""
-
 
     # -- host contract ----------------------------------------------------
     @property
     def name(self) -> str:
         return "jev"
-
 
     def update_from_response(self, usage: Dict[str, Any]) -> None:
         self.last_prompt_tokens = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
@@ -151,7 +142,6 @@ class JevEngine(EngineSettings):
             return False
         return tokens >= self._effective_trigger()
 
-
     # -- compaction --------------------------------------------------------
     def compress(
         self, messages: List[Dict[str, Any]], current_tokens: Optional[int] = None,
@@ -161,18 +151,25 @@ class JevEngine(EngineSettings):
         self.compression_count += 1
         self._messages_ref = messages
         self._memory_context = (memory_context or "").strip()[:2000]
+        stats: Dict[str, Any] = {"calls": 0, "candidates": 0, "mode": "jev"}
+        self.last_stats = stats
+        if self.egress_mode == "off":
+            stats["mode"] = "off"
+            return messages
+        if self.egress_mode not in ("metadata", "redacted_text", "full_text"):
+            stats.update({"mode": "preserve", "error": "invalid egress mode"})
+            return messages
         calls = self._collect_calls(messages)
         candidates = [c for c in calls if not c["pinned"]]
-        stats: Dict[str, Any] = {"calls": len(calls), "candidates": len(candidates), "mode": "jev"}
-        self.last_stats = stats
+        stats.update({"calls": len(calls), "candidates": len(candidates)})
         if not candidates:
             return messages
         try:
             state, state_tokens = self._fit_state(messages, calls)
             answers = self._ask_all(state, state_tokens, candidates)
-        except Exception as exc:  # noqa: BLE001 — fail-open preserves original
+        except Exception:  # noqa: BLE001 — fail-open preserves original
             stats["mode"] = "preserve"
-            stats["error"] = f"{type(exc).__name__}: {exc}"[:200]
+            stats["error"] = "egress or Jev failure"
             self._last_failure_monotonic = time.monotonic()
             return messages  # fail-open: Jev failure never mutates history
         by_id = {}
@@ -239,13 +236,15 @@ class JevEngine(EngineSettings):
             for i, msg in enumerate(messages):
                 tool_calls = [{
                     "id": c["id"], "tool": c["tool"],
-                    "input": _truncate(
+                    "input": metadata_input(c["input"]) if self.egress_mode == "metadata" else _truncate(
                         c["input"] if isinstance(c["input"], str) else json.dumps(c["input"], ensure_ascii=False),
                         input_chars),
                     "result": f"ok, {c['result_chars']} chars (omitted)",
                 } for c in by_call_idx.get(i, [])]
                 text = _content_text(msg.get("content"))
-                if self.egress_mode == "metadata":
+                if msg.get("role") == "tool":
+                    text = f"[{len(text)} chars omitted]" if text else ""
+                elif self.egress_mode == "metadata":
                     text = f"[{len(text)} chars]" if text else ""
                 if not text.strip() and not tool_calls:
                     continue
@@ -350,11 +349,16 @@ class JevEngine(EngineSettings):
     def _ask_jev(
         self, state: Dict[str, Any], questions: Dict[str, Any], batch: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
-        if not self.api_key:
-            self.api_key = self._resolve_key()
-        body = json.dumps({"model": self.model, "state": state, "questions": questions}).encode()
+        key = self.api_key.strip() if isinstance(self.api_key, str) else ""
+        if not key:
+            key = self._resolve_key()
+        self.api_key = key
+        payload: Dict[str, Any] = {"model": self.model, "state": state, "questions": questions}
+        if self.egress_mode == "redacted_text":
+            payload = redact_export_value(payload)
+        body = json.dumps(payload).encode()
         parsed = _http_post_json(self.base_url, body, {
-            "Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}, 60.0)
+            "Authorization": f"Bearer {key}", "Content-Type": "application/json"}, 60.0)
         answers = parsed.get("answers") or {}
         out: List[Dict[str, Any]] = []
         for call in batch:
@@ -373,12 +377,12 @@ class JevEngine(EngineSettings):
     def _resolve_key() -> str:
         try:
             from agent.secret_scope import get_secret
-            return get_secret("TYPESAFE_API_KEY")
-        except Exception:  # noqa: BLE001 — single-profile deployments keep the env read
-            key = os.environ.get("TYPESAFE_API_KEY", "")
-            if not key:
-                raise RuntimeError("TYPESAFE_API_KEY is not configured") from None
-            return key
+            key = get_secret("TYPESAFE_API_KEY")
+        except Exception:  # noqa: BLE001 — secret-scope failure must fail closed
+            raise RuntimeError("TYPESAFE_API_KEY unavailable from profile secret scope") from None
+        if not isinstance(key, str) or not key.strip():
+            raise RuntimeError("TYPESAFE_API_KEY is not configured")
+        return key.strip()
 
     def _decide(self, answer: Dict[str, Any]) -> str:
         if answer["keepResult"] >= self.keep_threshold:
