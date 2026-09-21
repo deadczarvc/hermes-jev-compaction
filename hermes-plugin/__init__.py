@@ -10,17 +10,10 @@ environment (the Hermes .env is loaded into os.environ at startup).
 Config (optional, under ``context.jev``): model, keep_threshold,
 max_state_tokens, max_request_tokens.
 
-Known limitation (upstream, affects every engine incl. the built-in one):
-live-config hot-apply (``tui_gateway/session_compression.py::
-_apply_live_compression_config``) currently raises ``NameError:
-is_truthy_value is not defined`` on line 88 — the helper is called but never
-defined/imported in that module (NousResearch/hermes-agent issue #115572).
-Practical effect: editing ``compression.*`` keys in config.yaml while a
-session is live may not propagate to the running engine; the values are
-picked up by the NEXT session start. This plugin carries the full attribute
-surface the function pokes (``_coerce_threshold_tokens_cap`` and friends) so
-the engine itself survives the call; the NameError fires on the host side
-before reaching the engine.
+Note: editing ``compression.*`` keys in config.yaml while a session is live
+may not propagate to the running engine; the values are picked up by the
+NEXT session start (upstream #115572 was fixed; this note remains as a
+caution for older Hermes versions).
 """
 from __future__ import annotations
 

@@ -50,7 +50,8 @@ Two σ below → one in ~6 calls flips. This is the "call stays but only barely"
 
 ## Conclusions
 
-1. **`keep_threshold: 0.5` is correct** for results — it aggressively drops stale bulk (100% reduction at 0.50 in Model 3) while the receipt guard saves non-idempotent confirmations.
+1. **`keep_threshold: 0.5` is a reasonable starting point** for results — it aggressively drops stale bulk while the receipt guard saves non-idempotent confirmations. However, this is **not a validated optimum**: only 5 synthetic fixtures were tested, no holdout set exists, and the real-world score distribution is unknown.
 2. **The call question is a weak discriminator** — Jev gives ~0.5–0.7 for everything. The signal is in the RESULT question (0.25–0.40 spread). Our engine already treats these independently.
 3. **litshing's 0.25 + silence-never-deletes** is more conservative than our 0.5 + fallback. Their approach keeps more context but risks the "Lost in the Middle" dilution. Our approach drops more but relies on `_RECEIPT_RE` to catch the irreplaceable.
-4. **Recommended**: keep `threshold=0.5`, rely on `_RECEIPT_RE` for non-idempotent tools, and revisit after first in-vivo compression.
+4. **Recommended**: keep `threshold=0.5` as a default; rely on `_RECEIPT_RE` for non-idempotent tools; collect real-world score distribution; revisit the threshold when N≥50 real scores are available.
+5. **Evidence quality**: LOW. 5 synthetic fixtures, no holdout, no adversarial cross-check with a second scorer. The asymmetric cost model (losing a receipt >> keeping extra text) favours conservative thresholds, but we lack the data to compute the true ROC curve.
