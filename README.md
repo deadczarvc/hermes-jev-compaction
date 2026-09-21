@@ -25,7 +25,7 @@ rewritten; only tool calls and results are deleted or truncated.
 |---|---|
 | `src/hermes.ts` | Bidirectional adapter: OpenAI-chat messages (`role/content/tool_calls` + `role:"tool"`) ↔ library `Message[]`. Handles nested and flat tool-call spellings, content-part arrays, grouped tool results. |
 | `bin/hermes-compact.mjs` | On-demand CLI: reads a transcript (JSON array / `{"messages":[...]}` / JSONL), runs Jev, writes the compacted transcript + stats. `--dry-run` maps without any API call. |
-| `tests/` | 9 adapter tests (TypeScript) + 18 Python engine tests. Green: 32/32 vitest, 18/18 pytest. |
+| `tests/` | TypeScript adapter tests + Python engine tests. Green: 32/32 vitest, 34/34 pytest. |
 | `HERMES.md` | Integration details for Hermes users and agent-operated workflows. |
 
 
@@ -64,7 +64,8 @@ const compacted = toHermes(result.messages);
 
 ```bash
 npx vitest run            # 32/32 (library + adapter)
-python -m pytest tests/test_jev_engine.py   # 18/18 (Python engine)
+# Python engine tests need the Hermes core on PYTHONPATH (plugin imports agent.context_engine):
+PYTHONPATH=<path-to-hermes-agent-repo> python -m pytest tests/   # 34/34
 ```
 
 ## Hermes integration status
