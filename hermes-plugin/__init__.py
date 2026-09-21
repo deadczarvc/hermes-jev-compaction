@@ -182,6 +182,19 @@ class JevEngine(EngineSettings):
                 d = "drop_result"
             by_id[c["id"]] = d
         out = self._apply(messages, calls, by_id)
+        dropped_calls = [c for c in calls if by_id.get(c["id"]) == "drop_call"]
+        self._dropped_receipts = getattr(self, "_dropped_receipts", [])[-100:]
+        for c in dropped_calls:
+            original = next(
+                (m for m in messages if m.get("role") == "tool" and m.get("tool_call_id") == c["tool_call_id"]),
+                None)
+            text = _content_text(original.get("content")) if original else ""
+            self._dropped_receipts.append({
+                "tool_call_id": c["tool_call_id"],
+                "tool": c.get("tool", "unknown"),
+                "preview": text[:80],
+                "full": text,
+            })
         stats.update({
             "kept": sum(1 for d in by_id.values() if d == "keep"),
             "results_truncated": sum(1 for d in by_id.values() if d == "drop_result"),

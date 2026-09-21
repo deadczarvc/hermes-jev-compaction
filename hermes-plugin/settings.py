@@ -96,6 +96,7 @@ class EngineSettings(ContextEngine):
     def get_status(self) -> dict[str, Any]:
         """Return a detached record, including immutable creation-time settings."""
         last_prompt = max(self.last_prompt_tokens, 0)
+        dropped = getattr(self, "_dropped_receipts", [])[-20:]
         return {
             "last_prompt_tokens": last_prompt,
             "threshold_tokens": self.threshold_tokens,
@@ -106,6 +107,7 @@ class EngineSettings(ContextEngine):
             "cooling": self._cooling(),
             "last_stats": copy.deepcopy(self.last_stats),
             "session_settings": json.loads(self._session_settings_json) if self._session_settings_json is not None else None,
+            "dropped_recent": copy.deepcopy(dropped),
         }
 
     def _cooling(self) -> bool:

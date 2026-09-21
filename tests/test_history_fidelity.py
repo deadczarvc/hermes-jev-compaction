@@ -80,3 +80,29 @@ def test_no_receipt_still_truncates(plugin, monkeypatch):
     text = out[3]["content"]
     assert len(text) < len(_NO_RECEIPT), "without receipt markers the result should still be truncated"
     assert "nothing special" not in text, "tail should not be kept when no receipt exists"
+
+
+def test_dropped_call_recoverable_via_status(plugin, monkeypatch):
+    """A drop_call decision must leave a verifiable recovery record in status."""
+    sent: list[bytes] = []
+
+    def fake_post(url: str, body: bytes, headers: dict, timeout: float) -> dict:
+        payload = json.loads(body.decode())
+        sent.append(body)
+        # Score everything low => drop_call
+        return {"answers": {k: {"noul": 0.0} for k in payload["questions"]}}
+
+    monkeypatch.setattr(plugin, "_http_post_json", fake_post)
+    eng = _engine(plugin)
+    msgs = _transcript("important result data")
+    out = eng.compress(msgs)
+
+    # The tool row was stubbed
+    assert "dropped by jev-compaction" in out[3]["content"]
+    # But status exposes the full original for recovery
+    status = eng.get_status()
+    assert status["dropped_recent"], "no recovery record in status"
+    rec = status["dropped_recent"][-1]
+    assert rec["tool_call_id"] == "call-1"
+    assert rec["tool"] == "send_email"
+    assert rec["full"] == "important result data"
