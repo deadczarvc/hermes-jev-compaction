@@ -1,7 +1,7 @@
 # hermes-jev-compaction
 
-> [!WARNING]
-> **DO NOT USE — 2026-09-21.** Audit of commit `bd827680b56d8bd37017b8a9baa89ef478121235` confirmed outbound tool-argument disclosure in `metadata` mode, confirmation-ID loss during compaction, image loss in CLI export, and an unconnected contract test corpus. These issues are not fixed by this notice. Read [SECURITY_ADVISORY.md](SECURITY_ADVISORY.md) before using the plugin or CLI. This warning supersedes conflicting claims below.
+> [!NOTE]
+> **Security advisory resolved at [`4a55bef`](https://github.com/deadczarvc/hermes-jev-compaction/commit/4a55bef69033ae357ccc6eaff7da76582f14abf9).** The four audit findings from 2026-09-21 have been fixed and verified. See [SECURITY_ADVISORY.md](SECURITY_ADVISORY.md) for the resolution table and evidence.
 
 Jev-powered compaction for **[Hermes Agent](https://github.com/NousResearch/hermes-agent)**.
 A Hermes-specialized fork of [tamaratran/fast-jev-compaction](https://github.com/tamaratran/fast-jev-compaction): every tool call in a session transcript is scored by the
