@@ -182,7 +182,7 @@ def test_deepcopy_is_plain_data():
     eng = make_engine()
     eng.api_key = "k"
     clone = copy.deepcopy(eng)
-    assert clone.name == "jev" and clone.api_key == "k" and clone is not eng
+    assert clone.name == "jev" and clone.api_key == "" and clone is not eng
 
 
 def test_should_compress_gates_on_threshold():

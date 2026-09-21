@@ -32,10 +32,11 @@ import time
 import urllib.request
 from typing import Any, Dict, List, Optional, Tuple
 
-from agent.context_engine import ContextEngine
+from .settings import DEFAULT_MODEL as DEFAULT_MODEL
+from .settings import FAILURE_BACKOFF_S as FAILURE_BACKOFF_S
+from .settings import SYSTEM_ONE_URL as SYSTEM_ONE_URL
+from .settings import EngineSettings
 
-SYSTEM_ONE_URL = "https://api.typesafe.ai/v1/systemone"
-DEFAULT_MODEL = "jev-1.13.0"
 STATE_CONTEXT = (
     "A coding agent conversation is being compacted to free context. `history` is the whole "
     "conversation so far, oldest first; tool outputs are replaced by a short `result` note and "
@@ -47,7 +48,6 @@ INPUT_CHARS = [1000, 200, 60]
 TEXT_HEAD, TEXT_TAIL = 400, 150
 TRUNCATE_HEAD_CHARS = 300
 REQUEST_OVERHEAD_TOKENS = 20
-FAILURE_BACKOFF_S = 300
 _ALLOWED_SCHEMES = ("https://", "http://")
 _TOKEN_PIECES = re.compile(r"[A-Za-z]+|\d+|[^\sA-Za-z\d]")
 _IDENTIFIER_RE = re.compile(
@@ -113,97 +113,15 @@ def _http_post_json(url: str, body: bytes, headers: Dict[str, str], timeout: flo
         return json.loads(resp.read())
 
 
-class JevEngine(ContextEngine):
+class JevEngine(EngineSettings):
     """Verbatim-keep compaction: Jev decides, nothing is summarized."""
 
-    def __init__(self) -> None:
-        self.api_key = ""
-        self.model = DEFAULT_MODEL
-        self.base_url = SYSTEM_ONE_URL
-        self.keep_threshold = 0.5
-        self.max_state_tokens = 25_000
-        self.max_request_tokens = 30_000
-        self.max_tokens: Optional[int] = None
-        self.egress_mode: str = "metadata"  # off|metadata|redacted_text|full_text
-        # Host live-config contract surface (tui_gateway/session_compression.py pokes these
-        # in place on every compression.* config change; built-in names kept 1:1).
-        self.model_thresholds: dict = {}
-        self.threshold_tokens_cap: int | None = None
-        self.tail_mode: str = "ratio"
-        self.summary_target_ratio: float = 0.25
-        self._configured_threshold_percent: float | None = None
-        self._config_context_length: int | None = None
-        self._resolved_context_length: int | None = None
-        self._threshold_tokens: int | None = None
-        self._tail_token_budget: int | None = None
-        self._last_failure_monotonic = 0.0
-        self._messages_ref: List[Dict[str, Any]] = []
-        self.last_stats: Dict[str, Any] = {}
 
     # -- host contract ----------------------------------------------------
     @property
     def name(self) -> str:
         return "jev"
 
-    def __deepcopy__(self, memo: Dict[int, Any]) -> "JevEngine":
-        """Plain-data clone only (no locks/clients) — required by the host's
-        deepcopy of plugin engines (#42449)."""
-        clone = JevEngine()
-        clone.api_key = self.api_key
-        clone.model = self.model
-        clone.base_url = self.base_url
-        clone.keep_threshold = self.keep_threshold
-        clone.max_state_tokens = self.max_state_tokens
-        clone.max_request_tokens = self.max_request_tokens
-        clone.max_tokens = self.max_tokens
-        clone._last_failure_monotonic = self._last_failure_monotonic
-        return clone
-
-    @staticmethod
-    def _coerce_threshold_tokens_cap(value: object) -> int | None:
-        """Host live-config contract (tui_gateway/session_compression.py calls this on any
-        engine when compression.* changes). A cap is a positive int, or None for "no cap"."""
-        try:
-            ivalue = int(value) if value is not None else 0
-        except (TypeError, ValueError):
-            return None
-        return ivalue if ivalue > 0 else None
-
-    @staticmethod
-    def _coerce_max_tokens(value: object) -> int | None:
-        try:
-            ivalue = int(value) if value is not None else 0
-        except (TypeError, ValueError):
-            return None
-        return ivalue if ivalue > 0 else None
-
-    def update_model(
-        self, model: str, context_length: int, base_url: str = "", api_key: str = "",
-        provider: str = "", api_mode: str = "",
-    ) -> None:
-        """Host call on init and model switch. super() sets threshold_tokens from the raw
-        percent; we then re-derive it with the dynamic max_tokens reservation."""
-        super().update_model(model, context_length, base_url=base_url, api_key=api_key,
-                             provider=provider, api_mode=api_mode)
-        self._refresh_reservation()
-
-    def _refresh_reservation(self) -> None:
-        """Re-read agent.max_tokens from config (the host never passes it to plugin engines);
-        recompute threshold_tokens with the exact input budget when known."""
-        if self.max_tokens is None:
-            try:
-                from hermes_cli.config import load_config_readonly
-                cfg = load_config_readonly() or {}
-                mt = (cfg.get("agent") or {}).get("max_tokens")
-                self.max_tokens = int(mt) if mt else None
-            except Exception:  # noqa: BLE001 — reservation stays static on config trouble
-                pass
-        if self.max_tokens and self.context_length > self.max_tokens:
-            budget = self.context_length - self.max_tokens
-            self.threshold_tokens = int(budget * self.threshold_percent)
-        # Live-config cap (host sets threshold_tokens_cap via _coerce_threshold_tokens_cap)
-        if self.threshold_tokens_cap:
-            self.threshold_tokens = min(self.threshold_tokens, self.threshold_tokens_cap)
 
     def update_from_response(self, usage: Dict[str, Any]) -> None:
         self.last_prompt_tokens = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
@@ -233,24 +151,6 @@ class JevEngine(ContextEngine):
             return False
         return tokens >= self._effective_trigger()
 
-    def on_session_reset(self) -> None:
-        self.last_prompt_tokens = 0
-        self.last_completion_tokens = 0
-        self.last_total_tokens = 0
-        self.compression_count = 0
-
-    def get_status(self) -> Dict[str, Any]:
-        last_prompt = max(self.last_prompt_tokens, 0)
-        return {
-            "last_prompt_tokens": last_prompt,
-            "threshold_tokens": self.threshold_tokens,
-            "context_length": self.context_length,
-            "usage_percent": min(100, last_prompt / self.context_length * 100) if self.context_length else 0,
-            "compression_count": self.compression_count,
-            "model": self.model,
-            "cooling": self._cooling(),
-            "last_stats": self.last_stats,
-        }
 
     # -- compaction --------------------------------------------------------
     def compress(
@@ -294,8 +194,6 @@ class JevEngine(ContextEngine):
         return out
 
     # -- internals ---------------------------------------------------------
-    def _cooling(self) -> bool:
-        return (time.monotonic() - self._last_failure_monotonic) < FAILURE_BACKOFF_S
 
     def _collect_calls(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Pair assistant tool_calls with role:"tool" result messages by tool_call_id."""
