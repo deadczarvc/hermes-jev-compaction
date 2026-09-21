@@ -124,6 +124,7 @@ class JevEngine(ContextEngine):
         self.max_state_tokens = 25_000
         self.max_request_tokens = 30_000
         self.max_tokens: Optional[int] = None
+        self.egress_mode: str = "metadata"  # off|metadata|redacted_text|full_text
         # Host live-config contract surface (tui_gateway/session_compression.py pokes these
         # in place on every compression.* config change; built-in names kept 1:1).
         self.model_thresholds: dict = {}
@@ -269,11 +270,11 @@ class JevEngine(ContextEngine):
         try:
             state, state_tokens = self._fit_state(messages, calls)
             answers = self._ask_all(state, state_tokens, candidates)
-        except Exception as exc:  # noqa: BLE001 — fallback keeps the session alive
-            stats["mode"] = "fallback_prune"
+        except Exception as exc:  # noqa: BLE001 — fail-open preserves original
+            stats["mode"] = "preserve"
             stats["error"] = f"{type(exc).__name__}: {exc}"[:200]
             self._last_failure_monotonic = time.monotonic()
-            return self._fallback_prune(messages)
+            return messages  # fail-open: Jev failure never mutates history
         by_id = {}
         for c, a in zip(candidates, answers, strict=False):
             d = self._decide(a)
@@ -346,6 +347,8 @@ class JevEngine(ContextEngine):
                     "result": f"ok, {c['result_chars']} chars (omitted)",
                 } for c in by_call_idx.get(i, [])]
                 text = _content_text(msg.get("content"))
+                if self.egress_mode == "metadata":
+                    text = f"[{len(text)} chars]" if text else ""
                 if not text.strip() and not tool_calls:
                     continue
                 entry: Dict[str, Any] = {"i": i, "role": msg.get("role"), "text": text}
@@ -357,7 +360,7 @@ class JevEngine(ContextEngine):
         def pack(history: List[Dict[str, Any]]) -> Tuple[Dict[str, Any], int]:
             context = STATE_CONTEXT
             memory_ctx = getattr(self, "_memory_context", "")
-            if memory_ctx:
+            if memory_ctx and self.egress_mode in ("redacted_text", "full_text"):
                 context += (
                     "\nMemory provider flags these items as long-term relevant — weigh them "
                     "toward keeping calls/results that relate:\n" + memory_ctx
@@ -398,6 +401,8 @@ class JevEngine(ContextEngine):
         return state, tokens
 
     def _goal(self) -> str:
+        if self.egress_mode == "metadata":
+            return ""  # metadata mode: no user text leaves the process
         prompts = [_content_text(m.get("content")) for m in self._messages_ref if m.get("role") == "user"]
         prompts = [p for p in prompts if p.strip()]
         return "\n".join(_truncate(p, 500) for p in prompts[-3:])
@@ -522,14 +527,19 @@ class JevEngine(ContextEngine):
                 out.append(msg)
                 continue
             if role == "assistant" and msg.get("tool_calls"):
-                kept_calls = [tc for tc in msg["tool_calls"] if tc.get("id") not in dropped]
-                if not kept_calls:
-                    # Keep the row (host may index); strip tool_calls and content.
-                    out.append({"role": "assistant", "content": "",
-                                "tool_calls": None})
-                    continue
-                if len(kept_calls) != len(msg["tool_calls"]):
-                    msg = dict(msg, tool_calls=kept_calls)
+                # Preserve tool pairing: dropped calls become stub entries with
+                # same id/name/empty args so the tool-result stub still pairs.
+                kept_calls = []
+                for tc in msg["tool_calls"]:
+                    if tc.get("id") in dropped:
+                        func = tc.get("function") or {}
+                        kept_calls.append({
+                            "id": tc["id"], "type": "function",
+                            "function": {"name": func.get("name") or "unknown_tool",
+                                         "arguments": "{}"}})
+                    else:
+                        kept_calls.append(tc)
+                msg = dict(msg, tool_calls=kept_calls)
                 out.append(msg)
                 continue
             out.append(msg)
@@ -576,6 +586,7 @@ def register(ctx: Any) -> None:
         compression = cfg.get("compression") or {}
         engine.threshold_percent = float(compression.get("threshold", 0.9))
         engine.max_tokens = (cfg.get("agent") or {}).get("max_tokens") or None
+        engine.egress_mode = ((cfg.get("context") or {}).get("jev") or {}).get("egress_mode", "metadata")
         jev_cfg = (cfg.get("context") or {}).get("jev") or {}
         engine.model = jev_cfg.get("model", engine.model)
         engine.keep_threshold = float(jev_cfg.get("keep_threshold", engine.keep_threshold))

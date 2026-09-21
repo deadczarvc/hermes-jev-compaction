@@ -73,17 +73,18 @@ def test_all_keep_returns_same_objects():
     assert eng.last_stats["mode"] == "jev" and eng.last_stats["kept"] >= 1
 
 
-def test_drop_call_blanks_payload_preserves_row():
-    """Index-safe: dropped tool results become stubs (same length); empty assistants stripped."""
+def test_drop_call_stubs_pair_preserved():
+    """Index-safe + pairing-safe: dropped calls become stubs on BOTH call and result rows."""
     eng = make_engine()
     msgs = transcript(n_calls=2)
     patch_ask(eng, FakeAnswers(lambda c: "drop_call"))
     out = eng.compress(msgs)
     tools = [m for m in out if m.get("role") == "tool"]
-    assert all(m["content"] == "[dropped by jev-compaction: judged no longer relevant]" for m in tools)
-    assert all(not m.get("tool_calls") for m in out if m.get("role") == "assistant")
+    assert all("dropped by jev-compaction" in m["content"] for m in tools)
+    # Assistant rows keep tool_calls as stubs (same id, empty args) for pairing
+    assistants = [m for m in out if m.get("role") == "assistant" and m.get("tool_calls")]
+    assert all(tc["function"]["arguments"] == "{}" for m in assistants for tc in m["tool_calls"])
     assert out[0]["role"] == "system" and out[-1]["content"] == "Summarize the results."
-    # Index safety: same number of rows in, same number out (for this fixture)
     assert len(out) == len(msgs)
 
 
@@ -101,12 +102,20 @@ def test_mixed_decisions_partition():
     eng = make_engine()
     msgs = transcript(n_calls=3)
     patch_ask(eng, FakeAnswers(lambda c: {"t1": "keep", "t2": "drop_result", "t3": "drop_call"}[c["id"]]))
-    tools = [m for m in eng.compress(msgs) if m.get("role") == "tool"]
+    out = eng.compress(msgs)
+    tools = [m for m in out if m.get("role") == "tool"]
     assert len(tools) == 3, "index-safe: all tool rows preserved"
     kept = [m for m in tools if "jev" not in m["content"]]
     truncated = [m for m in tools if "jev truncated" in m["content"]]
     dropped = [m for m in tools if "dropped by jev-compaction" in m["content"]]
     assert len(kept) == 1 and len(truncated) == 1 and len(dropped) == 1
+    # Pairing: dropped call's assistant keeps stub with same id
+    asst = [m for m in out if m.get("role") == "assistant" and m.get("tool_calls")]
+    dropped_ids = {"t3"}
+    for m in asst:
+        for tc in m["tool_calls"]:
+            if tc["id"] in dropped_ids:
+                assert tc["function"]["arguments"] == "{}", "dropped call args must be empty"
 
 
 # ---------- negative controls ----------
@@ -126,7 +135,7 @@ def test_jev_failure_falls_back_and_cools():
     eng = make_engine()
     patch_ask(eng, FakeAnswers(lambda c: "keep", fail_on="t2"))
     eng.compress(transcript(n_calls=3))
-    assert eng.last_stats["mode"] == "fallback_prune"
+    assert eng.last_stats["mode"] == "preserve"
     assert eng._cooling(), "failure arms the backoff"
     assert eng.should_compress(10**9) is False, "cooling engine must not re-fire"
 
@@ -147,7 +156,7 @@ def test_malformed_answer_raises_into_fallback():
         out = eng.compress(transcript(n_calls=1))
     finally:
         jev._http_post_json = original_http
-    assert eng.last_stats["mode"] == "fallback_prune", "NaN must be rejected by the engine guard"
+    assert eng.last_stats["mode"] == "preserve", "NaN must be rejected by the engine guard"
 
 
 def test_unpaired_tool_result_is_untouched():
@@ -221,6 +230,9 @@ def test_memory_context_reaches_jev_state():
         return [{"keepCall": 1.0, "keepResult": 1.0}] * len(candidates)
 
     eng._ask_all = fake_ask_all
+    eng.egress_mode = "full_text"
+    eng.egress_mode = "full_text"
+    eng.protect_last_n = 0
     eng.compress(msgs, memory_context="DB migration details matter long-term")
     assert "Memory provider flags" in captured["context"], "memory signal missing from state"
     assert "DB migration details" in captured["context"]
@@ -372,3 +384,74 @@ def test_threshold_tokens_cap_bounds_trigger():
     eng.threshold_tokens_cap = 2_000_000
     eng._refresh_reservation()
     assert eng.threshold_tokens == int((1_000_000 - 32768) * 0.95), "higher cap is a no-op"
+
+
+# ---------- P0-3/P0-4/P0-5 regression (v0.3.2) ----------
+
+def test_fail_open_preserves_original():
+    """Jev failure must return original messages unchanged (no destructive fallback)."""
+    eng = make_engine()
+    msgs = transcript(n_calls=3)
+    patch_ask(eng, FakeAnswers(lambda c: "keep", fail_on="t2"))
+    out = eng.compress(msgs)
+    assert out == msgs, "fail-open must return byte-identical original"
+    assert eng.last_stats["mode"] == "preserve"
+
+
+def test_fallback_prune_still_available_standalone():
+    """_fallback_prune still exists as a standalone tool for explicit opt-in."""
+    eng = make_engine()
+    msgs = transcript(n_calls=3)
+    out = eng._fallback_prune(msgs)
+    assert len(out) == len(msgs)
+
+
+def test_egress_metadata_strips_user_text():
+    """metadata mode: user text must not appear in Jev state."""
+    eng = make_engine()
+    eng.egress_mode = "metadata"
+    eng.protect_last_n = 0
+    msgs = transcript(n_calls=1)
+    captured = {}
+    eng._ask_all = lambda state, st, c: (captured.__setitem__("state", state), [{"keepCall": 1, "keepResult": 1}] * len(c))[1]
+    eng.compress(msgs)
+    state_str = json.dumps(captured["state"])
+    assert "Fix the failing test" not in state_str, "user text leaked in metadata mode" or "[1" in state_str
+
+
+def test_egress_full_text_passes_text():
+    eng = make_engine()
+    eng.egress_mode = "full_text"
+    eng.protect_last_n = 0
+    msgs = transcript(n_calls=1)
+    captured = {}
+    eng._ask_all = lambda state, st, c: (captured.__setitem__("state", state), [{"keepCall": 1, "keepResult": 1}] * len(c))[1]
+    eng.compress(msgs)
+    # transcript(n_calls=1) has user text "read file" at index 1
+    assert "Summarize the results." in json.dumps(captured["state"], ensure_ascii=False),         "full_text mode must include user text in state"
+    assert "output 0" in json.dumps(captured["state"], ensure_ascii=False),         "full_text mode must include tool result in state"
+
+
+def test_egress_metadata_no_memory_context_leak():
+    eng = make_engine()
+    msgs = transcript(n_calls=1)
+    captured = {}
+    eng._ask_all = lambda state, st, c: (captured.__setitem__("state", state), [{"keepCall": 1, "keepResult": 1}] * len(c))[1]
+    eng.compress(msgs, memory_context="secret memory content here")
+    assert "secret memory" not in json.dumps(captured["state"])
+
+
+def test_pairing_stub_preserves_tool_call_id():
+    """Dropped call's assistant row must keep same tool_call_id as result stub."""
+    eng = make_engine()
+    msgs = transcript(n_calls=2)
+    patch_ask(eng, FakeAnswers(lambda c: "drop_call"))
+    out = eng.compress(msgs)
+    # Every tool stub's tool_call_id must match an assistant tool_call id
+    asst_ids = set()
+    for m in out:
+        for tc in m.get("tool_calls") or []:
+            asst_ids.add(tc["id"])
+    for m in out:
+        if m.get("role") == "tool":
+            assert m["tool_call_id"] in asst_ids, f"orphan result: {m['tool_call_id']}"
