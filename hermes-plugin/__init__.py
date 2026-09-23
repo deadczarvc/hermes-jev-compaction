@@ -140,12 +140,23 @@ class JevEngine(EngineSettings):
             return False
         return tokens >= self._effective_trigger()
 
+    def _pre_compress(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Pre-conversion seam: validate and normalize messages before compression.
+        This is the plugin-side boundary where raw messages enter the pipeline,
+        before any content extraction or state fitting. Non-dict entries are
+        wrapped to prevent downstream crashes. Equivalent of a core pre-conversion
+        hook, but entirely within the official plugin API."""
+        if not isinstance(messages, list):
+            return messages
+        return [m if isinstance(m, dict) else {"role": "user", "content": str(m)} for m in messages]
+
     # -- compaction --------------------------------------------------------
     def compress(
         self, messages: List[Dict[str, Any]], current_tokens: Optional[int] = None,
         focus_topic: Optional[str] = None, force: bool = False, memory_context: str = "",
         bypass_cooldown: bool = False,
     ) -> List[Dict[str, Any]]:
+        messages = self._pre_compress(messages)
         if not isinstance(messages, list):
             return messages
         self.compression_count += 1
