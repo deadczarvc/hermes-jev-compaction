@@ -106,3 +106,26 @@ def test_dropped_call_recoverable_via_status(plugin, monkeypatch):
     assert rec["tool_call_id"] == "call-1"
     assert rec["tool"] == "send_email"
     assert rec["full"] == "important result data"
+
+
+def test_pre_compress_wraps_non_dict(plugin):
+    """Pre-conversion seam wraps non-dict entries to prevent downstream crashes."""
+    eng = plugin.JevEngine()
+    messages = [{"role": "user", "content": "hi"}, "not a dict", 42]
+    result = eng._pre_compress(messages)
+    assert len(result) == 3
+    assert isinstance(result[0], dict)
+    assert isinstance(result[1], dict)
+    assert result[1]["role"] == "user"
+    assert result[1]["content"] == "not a dict"
+    assert isinstance(result[2], dict)
+    assert result[2]["role"] == "user"
+    assert result[2]["content"] == "42"
+
+
+def test_pre_compress_non_list_passthrough(plugin):
+    """Pre-conversion seam returns non-list input unchanged (fail-open)."""
+    eng = plugin.JevEngine()
+    assert eng._pre_compress(None) is None
+    assert eng._pre_compress("hello") == "hello"
+    assert eng._pre_compress(42) == 42
