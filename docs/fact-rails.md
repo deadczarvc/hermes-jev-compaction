@@ -160,5 +160,9 @@ three failed and never shipped: one cut long JSON lines, one lost error lines (�
 
 95% CIs clustered by session; tokens at compactions at 50% and 75% of a session (3741 and 3167 tokens, 71–75
 sessions); error lines 13 339 in 77 sessions. Stubs came out 0.2–0.9% shorter. Caveats: the experimenter facts
-(1021 in 35 sessions) were the same set for every variant, and the Claude Code and Codex selectors still use the
-regex lines until fresh transcripts of their own are checked.
+(1021 in 35 sessions) were the same set for every variant.
+
+Elsewhere the regex lines stay. The fork's Codex sheet ran the same check on 86 fresh Codex rollouts and failed it
+(tokens used +1.4 [−0.3, +3.3] at 50k, experimenter facts −2.0 [−4.3, +0.6]): a sheet gives each call at most 1200
+chars of fact lines, too little room past the regex third and the error lines. The Claude Code hook waits for fresh
+transcripts of its own.
