@@ -34,6 +34,7 @@ from .settings import DEFAULT_MODEL as DEFAULT_MODEL
 from .settings import FAILURE_BACKOFF_S as FAILURE_BACKOFF_S
 from .settings import SYSTEM_ONE_URL as SYSTEM_ONE_URL
 from .settings import EngineSettings
+from .value_select import message_contexts, token_values, value_lines
 
 STATE_CONTEXT = (
     "A coding agent conversation is being compacted to free context. `history` is the whole "
@@ -353,8 +354,10 @@ def fact_stub(
     is_error: bool,
     tool_call_id: str | None = None,
     rails: dict | None = None,
+    ctx: dict | None = None,
 ) -> str:
-    """A reduced result that keeps its head, its fact lines and its tail; an error keeps more."""
+    """A reduced result that keeps its head, its fact lines and its tail; an error keeps more. With the result's
+    context (value_select.message_contexts) the fact lines are picked by learned token value, else by regex."""
     rails = rails or RAIL_TIERS[0]
     head_keep = max(FACT_HEAD_CHARS, ERROR_KEEP_CHARS) if is_error else FACT_HEAD_CHARS
     if len(text) <= max(rails["small"], head_keep + FACT_TAIL_CHARS + 120):
@@ -371,10 +374,19 @@ def fact_stub(
     tail_start = (
         len(text) - FACT_TAIL_CHARS if tail_nl in (-1, len(text) - 1) else tail_nl + 1
     )
-    facts = fact_lines(
-        text[head_end:tail_start],
-        max(FACT_BUDGET_CHARS, int(len(text) * rails["share"])),
-    )
+    budget = max(FACT_BUDGET_CHARS, int(len(text) * rails["share"]))
+    if ctx is None:
+        facts = fact_lines(text[head_end:tail_start], budget)
+    else:
+        # One result is stubbed at several tiers and more than once per tier: value its tokens and pick its lines once.
+        if "values" not in ctx:
+            ctx["values"] = token_values(text, ctx)
+        picked = ctx.setdefault("lines", {})
+        if (head_end, tail_start, budget) not in picked:
+            picked[head_end, tail_start, budget] = value_lines(
+                text[head_end:tail_start], budget, ctx["values"], fact_lines, _pieces
+            )
+        facts = picked[head_end, tail_start, budget]
     where = (
         full_output_note(tool_call_id)
         if tool_call_id
@@ -405,7 +417,12 @@ def rerun_note(text: str, tool_call_id: str | None = None) -> str:
 
 
 def reduced_text(
-    text: str, is_error: bool, tool_call_id: str, rails: dict, rerunnable: bool
+    text: str,
+    is_error: bool,
+    tool_call_id: str,
+    rails: dict,
+    rerunnable: bool,
+    ctx: dict | None = None,
 ) -> str:
     """One result under one rail tier. Idempotent: a result an earlier compaction reduced is final."""
     if _COMPACTED_MARK.search(text):
@@ -417,7 +434,7 @@ def reduced_text(
         and not _READ_OBSERVATION.search(text)
     ):
         return rerun_note(text, tool_call_id)
-    return fact_stub(text, is_error, tool_call_id, rails)
+    return fact_stub(text, is_error, tool_call_id, rails, ctx)
 
 
 def _chars(messages: list[dict[str, Any]]) -> int:
@@ -949,12 +966,23 @@ class JevEngine(EngineSettings):
             if m.get("role") == "tool" and m.get("tool_call_id") in dropped
         }
         reduced_cache: dict[tuple[str, int], str] = {}
+        # v0.8.0: fact lines by learned token value; JEV_COMPACTION_VALUE_SELECT=0 = the regex lines of v0.7.x
+        ctxs = (
+            message_contexts(messages, _content_text)
+            if os.environ.get("JEV_COMPACTION_VALUE_SELECT", "1") != "0"
+            else {}
+        )
 
         def reduced(tc_id: str, tier: int) -> str:
             if (tc_id, tier) not in reduced_cache:
                 text, is_error = texts[tc_id]
                 reduced_cache[tc_id, tier] = reduced_text(
-                    text, is_error, tc_id, RAIL_TIERS[tier], tc_id in rerunnable
+                    text,
+                    is_error,
+                    tc_id,
+                    RAIL_TIERS[tier],
+                    tc_id in rerunnable,
+                    ctxs.get(tc_id),
                 )
             return reduced_cache[tc_id, tier]
 
@@ -962,7 +990,11 @@ class JevEngine(EngineSettings):
         need = before * (1 - floor)
         after = _chars(
             self._apply_tier(
-                messages, calls, decisions, lambda i: RAIL_TIERS[level.get(i, 0)]
+                messages,
+                calls,
+                decisions,
+                lambda i: RAIL_TIERS[level.get(i, 0)],
+                ctxs,
             )
         )
         top = 0
@@ -988,7 +1020,7 @@ class JevEngine(EngineSettings):
             top = max(top, best[1])
             after -= best[2]
         out = self._apply_tier(
-            messages, calls, decisions, lambda i: RAIL_TIERS[level.get(i, 0)]
+            messages, calls, decisions, lambda i: RAIL_TIERS[level.get(i, 0)], ctxs
         )
         self._rail_tier = top
         hard_need = before * (1 - hard)
@@ -1058,6 +1090,7 @@ class JevEngine(EngineSettings):
         calls: list[dict[str, Any]],
         decisions: dict[str, str],
         rails: dict,
+        ctxs: dict[str, dict] | None = None,
     ) -> list[dict[str, Any]]:
         # Fork port (fact-keeping fast-jev-compaction): nothing Jev drops is erased. A reproducible read of files
         # shrinks to its call plus one line; any other call (network, processes, logs, tests, side effects,
@@ -1080,7 +1113,12 @@ class JevEngine(EngineSettings):
                     text = _content_text(msg.get("content"))
                     is_error = bool(msg.get("is_error"))
                     reduced = reduced_text(
-                        text, is_error, tc_id, rails_for(tc_id), tc_id in rerunnable
+                        text,
+                        is_error,
+                        tc_id,
+                        rails_for(tc_id),
+                        tc_id in rerunnable,
+                        (ctxs or {}).get(tc_id),
                     )
                     if reduced != text:
                         msg = dict(msg, content=reduced)

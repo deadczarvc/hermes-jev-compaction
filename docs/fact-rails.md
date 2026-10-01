@@ -1,4 +1,4 @@
-# Fact rails (v0.5.0, refined in v0.6.0, v0.7.0 and v0.7.2)
+# Fact rails (v0.5.0, refined in v0.6.0, v0.7.0, v0.7.2 and v0.8.0)
 
 Before v0.5.0 a call Jev scored as stale was stubbed: its arguments emptied, its result replaced by
 `dropped by jev-compaction`, or cut to a head. On real transcripts that lost most non-reproducible facts:
@@ -133,3 +133,32 @@ at a reduction of 0.2 or more.
 On 80 Hermes sessions that played no part in finding the rule, it changed the stubs by −0.1 … +0.3 pts (every lower
 bound ≥ −0.4; tier 2 −0.0 / −0.1): few tool calls there repeat a token from an earlier result, so the rule rarely acts.
 The rule written before that check required a gain; the engine is back on the regex fact lines.
+
+## Learned token value (v0.8.0)
+
+A fact stub's lines are now chosen by how likely the agent is to use their tokens after the compaction
+(`value_select.py`). A logistic regression on 13 token features (digits, path, extension, hex, length, repeats, in the
+call's arguments, in the last user message, results left to the end, position, result length, already reused by the
+agent) was fitted on 191 076 tokens of 85 transcripts (35 sessions; 7.7% used later). By session fold AUC 0.79; on
+held-out sets AUC 0.74 (Claude) and 0.80 (Hermes), calibration error ≤ 0.03.
+
+Within the chars the regex fact lines would take, a stub keeps the regex lines up to a third, then every error piece,
+then pieces by greedy weighted coverage (most not-yet-kept value per char). Covered value is monotone submodular, so
+the greedy keeps at least (1 − 1/e) of the best value a budget allows; the lazy evaluation it uses is exact. No stub
+grows. `JEV_COMPACTION_VALUE_SELECT=0` restores the regex lines of v0.7.x.
+
+Each variant was judged on a fresh set of Hermes sessions that played no part in building it, by a rule written before
+the run (tokens used: lower bound > 0; error lines and experimenter-chosen facts: lower bound ≥ −2 pts). The first
+three failed and never shipped: one cut long JSON lines, one lost error lines (−13 … −17), one lost experimenter facts
+(−2.2 … −5.2). The fourth, on 80 fresh sessions:
+
+| rail tier | tokens used after compaction | error lines | experimenter facts |
+|---|---|---|---|
+| 0–1 | +12.3 … +12.6 pts (≥ +8.7) | +11.7 (+8.7 … +14.3) | −0.6 (−1.8 … +0.2) |
+| 2 | +16.0 … +16.3 (≥ +13.5) | +23.3 (+19.4 … +26.7) | +1.0 (−0.4 … +2.1) |
+| 3 | +14.2 … +14.8 (≥ +12.2) | +28.7 (+25.0 … +32.0) | +1.1 (−1.1 … +3.4) |
+
+95% CIs clustered by session; tokens at compactions at 50% and 75% of a session (3741 and 3167 tokens, 71–75
+sessions); error lines 13 339 in 77 sessions. Stubs came out 0.2–0.9% shorter. Caveats: the experimenter facts
+(1021 in 35 sessions) were the same set for every variant, and the Claude Code and Codex selectors still use the
+regex lines until fresh transcripts of their own are checked.

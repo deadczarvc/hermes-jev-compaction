@@ -424,3 +424,95 @@ def test_expired_outputs_are_deleted(tmp_path):
     os.utime(old, (now - 31 * 86400, now - 31 * 86400))
     assert engine.JevEngine._expire_outputs(tmp_path, now) == 1
     assert not old.exists() and not old.parent.exists() and new.exists()
+
+
+def _value_case():
+    filler = [
+        f"node 10.0.{i % 250}.{i % 200}:8{i:03d} pid {50000 + i} size 1{i} bytes deadbeef{i:04x} /srv/app/v1.2.{i}/x.log"
+        for i in range(400)
+    ]
+    filler[230] = "artifact ready: build/out_cafe.tar"
+    filler[260] = "step three failed: permission denied"
+    text = "head line\n" + "\n".join(filler) + "\ntail line"
+    messages = [
+        {"role": "user", "content": "build it"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "c0",
+                    "type": "function",
+                    "function": {
+                        "name": "terminal",
+                        "arguments": json.dumps({"command": "make"}),
+                    },
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "c0", "content": text},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "c1",
+                    "type": "function",
+                    "function": {
+                        "name": "terminal",
+                        "arguments": json.dumps(
+                            {"command": "tar -tf build/out_cafe.tar"}
+                        ),
+                    },
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "c1", "content": "ok"},
+    ]
+    calls = [
+        {
+            "id": "t1",
+            "tool_call_id": "c0",
+            "tool": "terminal",
+            "input": {"command": "make"},
+            "pinned": False,
+        }
+    ]
+    return text, messages, calls
+
+
+def test_message_contexts_carry_input_distance_and_reuse():
+    _, messages, _ = _value_case()
+    ctxs = engine.message_contexts(messages, engine._content_text)
+    assert "make" in ctxs["c0"]["input"] and ctxs["c0"]["user"] == "build it"
+    assert (ctxs["c0"]["dist"], ctxs["c1"]["dist"]) == (2, 1)
+    assert "build/out_cafe.tar" in ctxs["c0"]["reused"]
+
+
+def test_value_stub_keeps_reused_token_and_error_within_regex_size():
+    text, messages, _ = _value_case()
+    ctx = engine.message_contexts(messages, engine._content_text)["c0"]
+    for tier in range(len(engine.RAIL_TIERS)):
+        regex = engine.fact_stub(text, False, "c0", engine.RAIL_TIERS[tier])
+        value = engine.fact_stub(text, False, "c0", engine.RAIL_TIERS[tier], ctx)
+        assert (
+            "build/out_cafe.tar" not in regex
+        )  # no regex pattern; the error line is in it by chance at tier 2
+        assert "build/out_cafe.tar" in value and "permission denied" in value
+        assert (
+            len(value) <= len(regex) + 3
+        )  # same chars for fact lines; the note's line count may differ
+
+
+def test_value_select_switch(monkeypatch):
+    text, messages, calls = _value_case()
+    ctx = engine.message_contexts(messages, engine._content_text)["c0"]
+    eng = engine.JevEngine()
+
+    def stub():
+        out = eng._apply(messages, calls, {"t1": "drop_result"}, 0.05)
+        return next(m for m in out if m.get("tool_call_id") == "c0")["content"]
+
+    assert stub() == engine.fact_stub(text, False, "c0", engine.RAIL_TIERS[0], ctx)
+    monkeypatch.setenv("JEV_COMPACTION_VALUE_SELECT", "0")
+    assert stub() == engine.fact_stub(text, False, "c0", engine.RAIL_TIERS[0])
