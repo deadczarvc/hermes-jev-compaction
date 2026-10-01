@@ -424,18 +424,3 @@ def test_expired_outputs_are_deleted(tmp_path):
     os.utime(old, (now - 31 * 86400, now - 31 * 86400))
     assert engine.JevEngine._expire_outputs(tmp_path, now) == 1
     assert not old.exists() and not old.parent.exists() and new.exists()
-
-
-def test_reused_tokens_are_digit_tokens_a_later_call_used():
-    listing = "\n".join(f"run job-{4100 + i} queued on worker" for i in range(50))
-    messages = [
-        {"role": "assistant", "tool_calls": [{"id": "a", "function": {"name": "terminal", "arguments": '{"command": "jobs list"}'}}]},
-        {"role": "tool", "tool_call_id": "a", "content": listing},
-        {"role": "assistant", "tool_calls": [{"id": "b", "function": {"name": "terminal", "arguments": '{"command": "jobs logs job-4120"}'}}]},
-        {"role": "tool", "tool_call_id": "b", "content": "body"},
-    ]
-    reused = engine.reused_tokens(messages)
-    assert "job-4120" in reused and "job-4121" not in reused
-    assert "job-4120" not in "\n".join(engine.fact_lines(listing, 60))
-    assert "job-4120" in "\n".join(engine.reuse_first_lines(listing, 60, reused))
-    assert engine.reuse_first_lines(listing, 300, set()) == engine.fact_lines(listing, 300)

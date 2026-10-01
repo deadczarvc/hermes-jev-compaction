@@ -348,61 +348,11 @@ _READ_OBSERVATION = re.compile(
 )
 
 
-_DIGIT_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/@#-]{5,}")
-
-
-def _digit_tokens(text: str) -> set[str]:
-    return {
-        t.rstrip(".:,")
-        for t in _DIGIT_TOKEN.findall(text)
-        if any(c.isdigit() for c in t)
-    }
-
-
-def reused_tokens(messages: list[dict[str, Any]]) -> set[str]:
-    """Digit tokens a tool result introduced and a later tool call's arguments used: what the agent acts on."""
-    seen: set[str] = set()
-    reused: set[str] = set()
-    for m in messages:
-        if m.get("role") == "assistant":
-            for tc in m.get("tool_calls") or []:
-                args = (tc.get("function") or {}).get("arguments", tc.get("arguments"))
-                reused |= _digit_tokens(str(args or "")) & seen
-        elif m.get("role") == "tool":
-            seen |= _digit_tokens(_content_text(m.get("content")))
-    return reused
-
-
-def reuse_first_lines(
-    text: str, budget: int, reused: set[str] | frozenset[str]
-) -> list[str]:
-    """Lines holding a token the agent already used first (up to 400 chars each), regex fact lines fill the rest.
-
-    Past use predicts later use (fork G13; tokens used after a compaction, stubs at rail tiers 0-3: +1.8 ... +9.1 pts).
-    """
-    pinned: list[str] = []
-    used = 0
-    if reused:
-        for ln in text.split("\n"):
-            s = ln[:400]
-            if used + len(s) + 1 <= budget and _digit_tokens(s) & reused:
-                pinned.append(s)
-                used += len(s) + 1
-    if not pinned:
-        return fact_lines(text, budget)
-    return pinned + [
-        x
-        for x in fact_lines(text, budget - used)
-        if not any(p in x or x in p for p in pinned)
-    ]
-
-
 def fact_stub(
     text: str,
     is_error: bool,
     tool_call_id: str | None = None,
     rails: dict | None = None,
-    reused: set[str] | frozenset[str] = frozenset(),
 ) -> str:
     """A reduced result that keeps its head, its fact lines and its tail; an error keeps more."""
     rails = rails or RAIL_TIERS[0]
@@ -421,10 +371,9 @@ def fact_stub(
     tail_start = (
         len(text) - FACT_TAIL_CHARS if tail_nl in (-1, len(text) - 1) else tail_nl + 1
     )
-    facts = reuse_first_lines(
+    facts = fact_lines(
         text[head_end:tail_start],
         max(FACT_BUDGET_CHARS, int(len(text) * rails["share"])),
-        reused,
     )
     where = (
         full_output_note(tool_call_id)
@@ -456,12 +405,7 @@ def rerun_note(text: str, tool_call_id: str | None = None) -> str:
 
 
 def reduced_text(
-    text: str,
-    is_error: bool,
-    tool_call_id: str,
-    rails: dict,
-    rerunnable: bool,
-    reused: set[str] | frozenset[str] = frozenset(),
+    text: str, is_error: bool, tool_call_id: str, rails: dict, rerunnable: bool
 ) -> str:
     """One result under one rail tier. Idempotent: a result an earlier compaction reduced is final."""
     if _COMPACTED_MARK.search(text):
@@ -473,7 +417,7 @@ def reduced_text(
         and not _READ_OBSERVATION.search(text)
     ):
         return rerun_note(text, tool_call_id)
-    return fact_stub(text, is_error, tool_call_id, rails, reused)
+    return fact_stub(text, is_error, tool_call_id, rails)
 
 
 def _chars(messages: list[dict[str, Any]]) -> int:
@@ -1005,13 +949,12 @@ class JevEngine(EngineSettings):
             if m.get("role") == "tool" and m.get("tool_call_id") in dropped
         }
         reduced_cache: dict[tuple[str, int], str] = {}
-        reused = reused_tokens(messages)
 
         def reduced(tc_id: str, tier: int) -> str:
             if (tc_id, tier) not in reduced_cache:
                 text, is_error = texts[tc_id]
                 reduced_cache[tc_id, tier] = reduced_text(
-                    text, is_error, tc_id, RAIL_TIERS[tier], tc_id in rerunnable, reused
+                    text, is_error, tc_id, RAIL_TIERS[tier], tc_id in rerunnable
                 )
             return reduced_cache[tc_id, tier]
 
@@ -1128,7 +1071,6 @@ class JevEngine(EngineSettings):
         rerunnable = {
             c["tool_call_id"] for c in calls if reproducible(c["tool"], c["input"])
         }
-        reused = reused_tokens(messages)
         out: list[dict[str, Any]] = []
         for msg in messages:
             role = msg.get("role")
@@ -1138,12 +1080,7 @@ class JevEngine(EngineSettings):
                     text = _content_text(msg.get("content"))
                     is_error = bool(msg.get("is_error"))
                     reduced = reduced_text(
-                        text,
-                        is_error,
-                        tc_id,
-                        rails_for(tc_id),
-                        tc_id in rerunnable,
-                        reused,
+                        text, is_error, tc_id, rails_for(tc_id), tc_id in rerunnable
                     )
                     if reduced != text:
                         msg = dict(msg, content=reduced)
