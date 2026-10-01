@@ -127,3 +127,9 @@ in-sample; the rules were written before each run.
 
 About 42–56% of the tokens remain after compaction, against 8–12% before. The floor keeps every compaction
 at a reduction of 0.2 or more.
+
+### Withdrawn after a held-out check
+
+On 80 Hermes sessions that played no part in finding the rule, it changed the stubs by −0.1 … +0.3 pts (every lower
+bound ≥ −0.4; tier 2 −0.0 / −0.1): few tool calls there repeat a token from an earlier result, so the rule rarely acts.
+The rule written before that check required a gain; the engine is back on the regex fact lines.
