@@ -1276,7 +1276,9 @@ class JevEngine(EngineSettings):
                     if now - JevEngine._last_expiry > 24 * 3600:
                         JevEngine._last_expiry = now
                         self._expire_outputs(base.parent, now)
-                path = base / f"{re.sub(r'[^\w.-]', '_', tc_id)}.txt"
+                # Not inside the f-string: Python 3.11 refuses a backslash there.
+                name = re.sub(r"[^\w.-]", "_", tc_id)
+                path = base / f"{name}.txt"
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(redacted.encode("utf-8"))
                 saved = f"the full output is saved at {path.as_posix()}; read it for anything not kept here"
