@@ -1,6 +1,6 @@
 {
   "name": "hermes-jev-compaction",
-  "version": "0.7.2",
+  "version": "0.7.3",
   "description": "Jev-powered compaction for Hermes Agent: every tool call scored by the Jev decision model (TypeSafe), stale context dropped, everything kept stays verbatim.",
   "type": "module",
   "license": "MIT",
