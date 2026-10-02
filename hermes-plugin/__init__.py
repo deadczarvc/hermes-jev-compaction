@@ -34,7 +34,7 @@ from .settings import DEFAULT_MODEL as DEFAULT_MODEL
 from .settings import FAILURE_BACKOFF_S as FAILURE_BACKOFF_S
 from .settings import SYSTEM_ONE_URL as SYSTEM_ONE_URL
 from .settings import EngineSettings
-from .value_select import message_contexts, token_values, value_lines
+from .value_select import message_contexts, pool_lines, token_values, toks, value_parts
 
 STATE_CONTEXT = (
     "A coding agent conversation is being compacted to free context. `history` is the whole "
@@ -381,12 +381,16 @@ def fact_stub(
         # One result is stubbed at several tiers and more than once per tier: value its tokens and pick its lines once.
         if "values" not in ctx:
             ctx["values"] = token_values(text, ctx)
-        picked = ctx.setdefault("lines", {})
-        if (head_end, tail_start, budget) not in picked:
-            picked[head_end, tail_start, budget] = value_lines(
+        key = (head_end, tail_start, budget)
+        parts, picked = ctx.setdefault("parts", {}), ctx.setdefault("lines", {})
+        if key not in picked:
+            units, pre, greedy = value_parts(
                 text[head_end:tail_start], budget, ctx["values"], fact_lines, _pieces
             )
-        facts = picked[head_end, tail_start, budget]
+            parts[key] = (units, pre, greedy, ctx["values"])
+            picked[key] = [units[i] for i in sorted(pre + greedy)]
+        ctx["key"] = key  # the stub's last pick, for the pooled pass (JevEngine._pool)
+        facts = picked[key]
     where = (
         full_output_note(tool_call_id)
         if tool_call_id
@@ -1019,6 +1023,16 @@ class JevEngine(EngineSettings):
             level[best[0]] = best[1]
             top = max(top, best[1])
             after -= best[2]
+        if ctxs and os.environ.get("JEV_COMPACTION_POOL", "1") != "0":
+            # v0.9: the stubs' greedy chars, pooled over the whole compaction (value_select.pool_lines)
+            for ctx in ctxs.values():
+                ctx["key"] = None
+            self._pool(
+                self._apply_tier(
+                    messages, calls, decisions, lambda i: RAIL_TIERS[level.get(i, 0)], ctxs
+                ),
+                ctxs,
+            )
         out = self._apply_tier(
             messages, calls, decisions, lambda i: RAIL_TIERS[level.get(i, 0)], ctxs
         )
@@ -1030,6 +1044,26 @@ class JevEngine(EngineSettings):
                 self._rail_tier = LAST_RESORT_TIER
                 out = evicted
         return out
+
+    @staticmethod
+    def _pool(base: list[dict[str, Any]], ctxs: dict[str, dict]) -> None:
+        """Refill the greedy fact lines of every stub in `base` from one budget; the next _apply_tier uses them."""
+        parts, covered = {}, set()
+        for msg in base:
+            if msg.get("role") != "tool":
+                continue
+            stub = _content_text(msg.get("content"))
+            ctx = ctxs.get(msg.get("tool_call_id"))
+            key = ctx.get("key") if ctx else None
+            if key is None:  # kept whole, a re-run note, or no value context: all of it stays
+                covered |= toks(stub)
+                continue
+            units, _pre, greedy, _values = ctx["parts"][key]
+            kept = {units[i] for i in greedy}
+            covered |= toks("\n".join(ln for ln in stub.split("\n") if ln not in kept))
+            parts[msg["tool_call_id"]] = ctx["parts"][key]
+        for tc_id, lines in pool_lines(parts, covered).items():
+            ctxs[tc_id]["lines"][ctxs[tc_id]["key"]] = lines
 
     def _last_resort(
         self,

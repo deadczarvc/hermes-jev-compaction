@@ -177,6 +177,37 @@ def message_contexts(
     }
 
 
+def value_parts(
+    text: str,
+    budget: int,
+    values: dict[str, float],
+    fact_lines: Callable[[str, int], list[str]],
+    pieces: Callable[[str], list[str]],
+) -> tuple[list[str], list[int], list[int]]:
+    """Within the chars the regex fact lines use: regex lines up to a third, error pieces (the preamble), then lazy
+    greedy coverage. Returns (pieces, preamble indices, greedy indices)."""
+    cap = sum(len(x) + 1 for x in fact_lines(text, budget))
+    units = [p for raw in text.splitlines() for p in pieces(raw)]
+    index = {u: i for i, u in enumerate(units)}
+    pre: list[int] = []
+    covered: set[str] = set()
+    used = 0
+    for line in fact_lines(text, cap // 3):
+        i = index.get(line)
+        if i is not None and i not in pre and used + len(line) + 1 <= cap:
+            pre.append(i)
+            used += len(line) + 1
+            covered.update(toks(line))
+    for i, u in enumerate(units):
+        if i not in pre and ERROR_PIECE.search(u) and used + len(u) + 1 <= cap:
+            pre.append(i)
+            used += len(u) + 1
+            covered.update(toks(u))
+    taken = set(pre)
+    cands = [(i, units[i], toks(units[i]), values) for i in range(len(units)) if i not in taken]
+    return units, pre, lazy_cover(cands, covered, cap - used)
+
+
 def value_lines(
     text: str,
     budget: int,
@@ -184,46 +215,48 @@ def value_lines(
     fact_lines: Callable[[str, int], list[str]],
     pieces: Callable[[str], list[str]],
 ) -> list[str]:
-    """Within the chars the regex fact lines use: regex lines up to a third, error pieces, then lazy greedy coverage."""
-    cap = sum(len(x) + 1 for x in fact_lines(text, budget))
-    units = [p for raw in text.splitlines() for p in pieces(raw)]
-    index = {u: i for i, u in enumerate(units)}
-    taken: set[int] = set()
-    covered: set[str] = set()
-    used = 0
+    units, pre, greedy = value_parts(text, budget, values, fact_lines, pieces)
+    return [units[i] for i in sorted(pre + greedy)]
 
-    def take(i: int) -> None:
-        nonlocal used
-        taken.add(i)
-        used += len(units[i]) + 1
-        covered.update(toks(units[i]))
 
-    for line in fact_lines(text, cap // 3):
-        i = index.get(line)
-        if i is not None and i not in taken and used + len(line) + 1 <= cap:
-            take(i)
-    for i, u in enumerate(units):
-        if i not in taken and ERROR_PIECE.search(u) and used + len(u) + 1 <= cap:
-            take(i)
-    unit_toks = [toks(u) for u in units]
-    heap = [
-        (-sum(values.get(t, 0.0) for t in ut) / (len(units[i]) + 1), i)
-        for i, ut in enumerate(unit_toks)
-        if ut and i not in taken
-    ]
+def lazy_cover(cands: list[tuple[Any, str, set[str], dict[str, float]]], covered: set[str], room: float) -> list[Any]:
+    """Lazy greedy weighted coverage: value of not-yet-covered tokens per char, within `room` chars. `cands` are
+    (key, piece, its tokens, token values); returns the keys picked, in pick order. Updates `covered`."""
+    heap = [(-sum(v.get(t, 0.0) for t in ts) / (len(u) + 1), n) for n, (_k, u, ts, v) in enumerate(cands) if ts]
     heapq.heapify(heap)
+    picked, used = [], 0
     while heap:
-        _, i = heapq.heappop(heap)
-        gain = sum(values.get(t, 0.0) for t in unit_toks[i] - covered) / (
-            len(units[i]) + 1
-        )
+        _, n = heapq.heappop(heap)
+        _k, u, ts, v = cands[n]
+        gain = sum(v.get(t, 0.0) for t in ts - covered) / (len(u) + 1)
         if gain <= 0:
             continue
         if heap and gain < -heap[0][0] - 1e-12:
-            heapq.heappush(
-                heap, (-gain, i)
-            )  # lazy: a stale bound goes back with its true gain
+            heapq.heappush(heap, (-gain, n))  # lazy: a stale bound goes back with its true gain
             continue
-        if used + len(units[i]) + 1 <= cap:
-            take(i)
-    return [units[i] for i in sorted(taken)]
+        if used + len(u) + 1 > room:
+            continue
+        picked.append(cands[n][0])
+        used += len(u) + 1
+        covered |= ts
+    return picked
+
+
+def pool_lines(
+    parts: dict[Any, tuple[list[str], list[int], list[int], dict[str, float]]], covered: set[str]
+) -> dict[Any, list[str]]:
+    """GA (v0.9): one fact budget per compaction. The chars every result's greedy spent are refilled by one lazy greedy
+    over the pieces of all results; each keeps its preamble. `parts`: key -> (pieces, preamble, greedy, values);
+    `covered`: tokens kept outside the greedy lines anywhere in the compaction. Returns each result's fact lines.
+    Held-out check (H7, 77 Hermes sessions): tokens used later kept +2.8 / +5.0 / +9.8 pts at tiers 0-1 / 2 / 3."""
+    room = sum(sum(len(units[i]) + 1 for i in greedy) for units, _pre, greedy, _v in parts.values())
+    cands = [
+        ((key, i), units[i], toks(units[i]), values)
+        for key, (units, pre, _greedy, values) in parts.items()
+        for i in range(len(units))
+        if i not in pre
+    ]
+    picks: dict[Any, list[int]] = {key: [] for key in parts}
+    for key, i in lazy_cover(cands, covered, room):
+        picks[key].append(i)
+    return {key: [units[i] for i in sorted(pre + picks[key])] for key, (units, pre, _g, _v) in parts.items()}
