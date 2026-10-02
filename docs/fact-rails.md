@@ -166,3 +166,25 @@ Elsewhere the regex lines stay. The fork's Codex sheet ran the same check on 86 
 (tokens used +1.4 [−0.3, +3.3] at 50k, experimenter facts −2.0 [−4.3, +0.6]): a sheet gives each call at most 1200
 chars of fact lines, too little room past the regex third and the error lines. The Claude Code hook waits for fresh
 transcripts of its own.
+
+## One fact budget per compaction (v0.9.0)
+
+Until v0.8 each stub spent its own fact budget. Now the chars the stubs of one compaction spend on value-chosen lines
+form one budget, filled by one lazy greedy over the pieces of all of them (`value_select.pool_lines`, `JevEngine._pool`):
+a value-dense line of one result can take chars a weak line of another would have used. Heads, tails, the regex third
+and error pieces stay in place, and every token any stub already keeps counts as covered, so nothing is bought twice.
+The total stub size does not grow. `JEV_COMPACTION_POOL=0` restores per-stub budgets.
+
+Two preregistered rounds on fresh Hermes sessions. The first (80 sessions) passed on tokens used but its guard on the
+35-session experimenter-fact benchmark could not pass at tier 3 for any selector (its interval is about ±3 pts); the
+second round kept that benchmark as a report and guarded with the experimenter-style facts of the fresh set itself:
+
+| rail tier | tokens used after compaction (vs v0.8) | error lines | fresh-set facts |
+|---|---|---|---|
+| 0–1 | +2.0 (+1.2 … +3.0) | +0.1 (+0.0 … +0.4) | +1.8 (+0.8 … +2.9) |
+| 2 | +5.5 (+4.3 … +6.7) | +0.3 (+0.1 … +0.5) | +3.2 (+1.9 … +4.6) |
+| 3 | +11.3 (+9.4 … +13.3) | +0.7 (+0.4 … +1.1) | +3.2 (+2.3 … +4.2) |
+
+80 fresh sessions (78 with compactions); 95% CIs clustered by session; stub size 0.998–1.000 of v0.8. The first round
+on another 80 sessions gave +2.8 / +5.0 / +9.8 at tiers 0–1 / 2 / 3. Cost: one more greedy pass per compaction, up to
++4.6 s on the largest sessions tried (1.6–6.1M chars).

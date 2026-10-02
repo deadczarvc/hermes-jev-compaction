@@ -516,3 +516,42 @@ def test_value_select_switch(monkeypatch):
     assert stub() == engine.fact_stub(text, False, "c0", engine.RAIL_TIERS[0], ctx)
     monkeypatch.setenv("JEV_COMPACTION_VALUE_SELECT", "0")
     assert stub() == engine.fact_stub(text, False, "c0", engine.RAIL_TIERS[0])
+
+
+def _two_outputs():
+    text, messages, calls = _value_case()
+    plain = "\n".join(f"row {i} value 7{i:03d} status idle" for i in range(400))
+    messages = messages[:3] + [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "c2",
+                    "type": "function",
+                    "function": {"name": "terminal", "arguments": json.dumps({"command": "stats"})},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "c2", "content": plain},
+    ] + messages[3:]
+    calls = calls + [
+        {"id": "t2", "tool_call_id": "c2", "tool": "terminal", "input": {"command": "stats"}, "pinned": False}
+    ]
+    return messages, calls
+
+
+def test_pooled_budget_keeps_size_and_the_valued_lines(monkeypatch):
+    messages, calls = _two_outputs()
+    eng = engine.JevEngine()
+
+    def stubs():
+        out = eng._apply(messages, calls, {"t1": "drop_result", "t2": "drop_result"}, 0.05)
+        return {m["tool_call_id"]: m["content"] for m in out if m.get("tool_call_id") in ("c0", "c2")}
+
+    monkeypatch.setenv("JEV_COMPACTION_POOL", "0")
+    own = stubs()
+    monkeypatch.setenv("JEV_COMPACTION_POOL", "1")
+    pooled = stubs()
+    assert sum(map(len, pooled.values())) <= sum(map(len, own.values())) + 6  # same fact chars; notes may differ
+    assert "build/out_cafe.tar" in pooled["c0"] and "permission denied" in pooled["c0"]

@@ -22,7 +22,7 @@ omitted, nothing rewritten) and answers two yes/no questions per tool call —
 should the call stay, and should its result stay verbatim. Text is never
 rewritten; only tool calls and results are deleted or truncated.
 
-## Fact rails (v0.5.0, refined in v0.6.0, v0.7.0 and v0.8.0)
+## Fact rails (v0.5.0, refined in v0.6.0, v0.7.0, v0.8.0 and v0.9.0)
 
 Nothing Jev drops is erased any more. A reproducible read longer than 3000 chars shrinks to a one-line note;
 any other result keeps its head, its fact lines (errors, HTTP codes, paths, versions, ids, counts, receipts)
@@ -31,7 +31,7 @@ and its tail, and results up to 6000 chars stay whole. When Jev is unreachable, 
 the engine kept 50/50 preregistered facts (v0.4.x: 4/50) at a 45% token reduction (v0.4.x: 88%). Rules and evidence:
 [docs/fact-rails.md](docs/fact-rails.md). Since v0.7.0 a compaction frees what the prompt needs rather than a fixed
 share, cuts where the fewest facts are lost, and saves the full output of every reduced result to a file named in
-its note, so across repeated compactions every preregistered fact stays in the context or one read away. Since v0.8.0 a stub's fact lines are
+its note, so across repeated compactions every preregistered fact stays in the context or one read away. Since v0.9.0 one fact budget serves all the stubs of a compaction. Since v0.8.0 a stub's fact lines are
 chosen by how likely the agent is to use their tokens (a model checked on sessions it never saw: +12 … +16 pts of the
 tokens used later, +12 … +29 of error lines, no stub longer).
 The same rules run in Claude Code:
