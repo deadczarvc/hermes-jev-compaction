@@ -21,10 +21,10 @@ the problem you're solving, not just the solution.
 2. Make your changes.
 3. Run tests:
    ```bash
-   npx vitest run                              # TypeScript (library + adapter)
-   python -m pytest tests/test_jev_engine.py   # Python engine (needs Hermes venv)
+   npm run build && npx vitest run                         # TypeScript (library, adapter, CLI)
+   PYTHONPATH=<path-to-hermes-agent> python -m pytest tests/   # Python plugin (Hermes venv)
    ```
-4. Ensure `npm run build` and `npm run typecheck` pass.
+4. Ensure `npm run typecheck` passes.
 5. Commit with a clear message describing *what* and *why*.
 6. Push and open a PR against `main`.
 

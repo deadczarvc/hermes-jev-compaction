@@ -1241,7 +1241,7 @@ class JevEngine(EngineSettings):
         except Exception:  # noqa: BLE001 — outside Hermes (tests, offline runs)
             home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
         session = re.sub(r"[^\w.-]", "_", self._snapshot_session_id or "session")
-        # Under cache/: the station's restic backup (**/cache) and indexers skip it; state.db is not backed up either.
+        # Under cache/: backup and indexing setups usually exclude it.
         return home / "cache" / "jev-compaction" / session
 
     # Saved outputs live as long as a Claude Code transcript by default; expired files are deleted once a day.

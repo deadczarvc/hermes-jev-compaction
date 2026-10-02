@@ -1,4 +1,4 @@
-# Fact rails (v0.5.0, refined in v0.6.0, v0.7.0, v0.7.2 and v0.8.0)
+# Fact rails (v0.5.0, refined in v0.6.0, v0.7.0, v0.7.2, v0.8.0, v0.9.0 and v0.10.0)
 
 Before v0.5.0 a call Jev scored as stale was stubbed: its arguments emptied, its result replaced by
 `dropped by jev-compaction`, or cut to a head. On real transcripts that lost most non-reproducible facts:
@@ -45,8 +45,8 @@ run the same rules and kept the same facts in every measurement.
   pointing to `state.db`. `JEV_COMPACTION_SAVE_OUTPUTS=0` turns it off. Since v0.7.1:
   - the copy passes through Hermes' shared redactor (the one egress uses) first; without the redactor nothing is
     written (fail closed);
-  - the folder is under `cache/`, which the station's backups and indexers skip (`state.db` is not backed up
-    either);
+  - the folder is under `cache/`, which backup and indexing setups usually exclude (exclude it yourself if
+    yours does not);
   - saved outputs older than 30 days are deleted, once a day;
   - ids keep only `[\w.-]`, so no id writes outside the session folder.
   Measured on 5995 tool outputs of the evaluation transcripts: 0 values of a known secret family; masking removed

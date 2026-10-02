@@ -9,9 +9,11 @@ Jev decision model (TypeSafe System One API, `jev-1.13.0`); stale calls and
 results are dropped or truncated, everything kept stays **verbatim** — no
 lossy summaries. File paths, exact errors, and command outputs survive.
 
-Languages: **English** · [Русский](HERMES.ru.md) · [中文](HERMES.zh-CN.md)
+Upstream has had no commits since 2026-09-18 and is not maintained; this fork is developed on its own, and its Claude
+Code counterpart is [deadczarvc-labs/jev-factkeep-compaction](https://github.com/deadczarvc-labs/jev-factkeep-compaction).
 
-Deep dive: [HERMES.md](HERMES.md) · Upstream reference: [README-UPSTREAM.md](README-UPSTREAM.md)
+Integration notes: [HERMES.md](HERMES.md) · [Русский](HERMES.ru.md) · [中文](HERMES.zh-CN.md) · Upstream
+reference: [README-UPSTREAM.md](README-UPSTREAM.md)
 
 ## Why
 
@@ -41,9 +43,10 @@ The same rules run in Claude Code:
 
 | File | Purpose |
 |---|---|
+| `hermes-plugin/` | Hermes context engine plugin (`jev-context-engine`): Jev decisions and the fact rails inside a running session, fallback without HTTP, saved full outputs. |
 | `src/hermes.ts` | Bidirectional adapter: OpenAI-chat messages (`role/content/tool_calls` + `role:"tool"`) ↔ library `Message[]`. Handles nested and flat tool-call spellings, content-part arrays, grouped tool results. |
 | `bin/hermes-compact.mjs` | On-demand CLI: reads a transcript (JSON array / `{"messages":[...]}` / JSONL), runs Jev, writes the compacted transcript + stats. `--dry-run` maps without any API call. |
-| `tests/` | TypeScript adapter tests + Python engine tests. Green: 32/32 vitest, 97/97 pytest. |
+| `tests/` | TypeScript library, adapter and CLI tests + Python plugin tests. Green at v0.10.0: 41/41 vitest, 99/99 pytest. |
 | `HERMES.md` | Integration details for Hermes users and agent-operated workflows. |
 
 
@@ -70,29 +73,29 @@ user prompts), `--preserve-recent 6`, `--keep-threshold 0.5`,
 import { fromHermes, toHermes, hermesGoal } from './src/hermes.js';
 import { compactMessages } from './dist/index.js';
 
-const { messages, systemTexts } = fromHermes(hermesTranscript);
-const result = await compactMessages(messages, {
+const transcript = fromHermes(hermesMessages);
+const result = await compactMessages(transcript.messages, {
   model: 'jev-1.13.0',          // jev-latest resolves here today; pin for reproducibility
-  goal: hermesGoal(systemTexts),
+  goal: hermesGoal(transcript.systemTexts),
 });
-const compacted = toHermes(result.messages);
+const compacted = toHermes(result.messages, transcript);   // keeps images, unknown roles, raw arguments
 ```
 
 ## Tests
 
 ```bash
-npx vitest run            # 32/32 (library + adapter)
-# Python engine tests need the Hermes core on PYTHONPATH (plugin imports agent.context_engine):
-PYTHONPATH=<path-to-hermes-agent-repo> python -m pytest tests/   # 83/83
+npm run build             # the CLI tests run dist/
+npx vitest run            # 41/41 (library, adapter, CLI)
+# Plugin tests need the Hermes core on PYTHONPATH (the plugin imports agent.context_engine):
+PYTHONPATH=<path-to-hermes-agent-repo> python -m pytest tests/   # 99/99
 ```
 
-## Hermes integration status
+## In-session plugin
 
-In-session: `hermes-plugin/` is a Hermes **context engine plugin** (the
-`ContextEngine` extension point). Copy it to `~/.hermes/plugins/jev-context-engine/`
-and set `context.engine: jev` in config.yaml; compaction then runs inside the
-session without core patches. The CLI above stays for on-demand use. See
-`HERMES.md` for the running notes.
+`hermes-plugin/` is a Hermes **context engine plugin** (the `ContextEngine` extension point). Copy it to
+`~/.hermes/plugins/jev-context-engine/`, set `context.engine: jev` in config.yaml and put `TYPESAFE_API_KEY` in the
+Hermes `.env`; compaction then runs inside the session without core patches. Settings and switches:
+[HERMES.md](HERMES.md). The CLI above stays for on-demand use.
 
 ## Threshold calibration
 

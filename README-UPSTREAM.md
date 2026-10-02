@@ -4,7 +4,9 @@
 > specialized for **Hermes Agent** — start with [README.md](README.md)
 > (also: [HERMES.ru.md](HERMES.ru.md), [HERMES.zh-CN.md](HERMES.zh-CN.md),
 > [HERMES.md](HERMES.md) for the deep dive). The upstream README describes the
-> Claude Code plugin integration, which is not the focus of this fork.
+> Claude Code plugin integration, which is not the focus of this fork. Upstream has had no commits since
+> 2026-09-18 and is not maintained; the maintained Claude Code fork is
+> [deadczarvc-labs/jev-factkeep-compaction](https://github.com/deadczarvc-labs/jev-factkeep-compaction).
 
 ---
 
