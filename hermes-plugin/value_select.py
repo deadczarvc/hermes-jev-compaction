@@ -10,6 +10,7 @@ Held-out check on 80 fresh Hermes sessions: tokens used +12…+16 pts, error lin
 
 from __future__ import annotations
 
+import bisect
 import heapq
 import math
 import re
@@ -242,16 +243,62 @@ def lazy_cover(cands: list[tuple[Any, str, set[str], dict[str, float]]], covered
     return picked
 
 
+def _aligned_at(s: str, t: str) -> list[int]:
+    """Start offsets where `t` occurs in `s` with no letter or digit touching it on either side."""
+    out, p = [], s.find(t)
+    while p != -1:
+        e = p + len(t)
+        if (p == 0 or not s[p - 1].isalnum()) and (e == len(s) or not s[e].isalnum()):
+            out.append(p)
+        p = s.find(t, p + 1)
+    return out
+
+
+def _aligned(s: str, t: str) -> bool:
+    p = s.find(t)
+    while p != -1:
+        e = p + len(t)
+        if (p == 0 or not s[p - 1].isalnum()) and (e == len(s) or not s[e].isalnum()):
+            return True
+        p = s.find(t, p + 1)
+    return False
+
+
+def contained(units: list[str], keys: list[str]) -> list[set[str]]:
+    """Each piece's tokens plus every key visible inside it as a word (a short hash inside a path, an id inside a
+    URL): a reader sees those too, so a piece that shows one covers it (GACC)."""
+    res = [toks(u) for u in units]
+    joined = "\n".join(units)
+    starts, o = [], 0
+    for u in units:
+        starts.append(o)
+        o += len(u) + 1
+    for t in keys:
+        for p in _aligned_at(joined, t):
+            i = bisect.bisect_right(starts, p) - 1
+            if p + len(t) <= starts[i] + len(units[i]):
+                res[i].add(t)
+    return res
+
+
 def pool_lines(
-    parts: dict[Any, tuple[list[str], list[int], list[int], dict[str, float]]], covered: set[str]
+    parts: dict[Any, tuple[list[str], list[int], list[int], dict[str, float]]],
+    covered: set[str],
+    side: str | None = None,
 ) -> dict[Any, list[str]]:
     """GA (v0.9): one fact budget per compaction. The chars every result's greedy spent are refilled by one lazy greedy
     over the pieces of all results; each keeps its preamble. `parts`: key -> (pieces, preamble, greedy, values);
     `covered`: tokens kept outside the greedy lines anywhere in the compaction. Returns each result's fact lines.
     Held-out check (H7, 77 Hermes sessions): tokens used later kept +2.8 / +5.0 / +9.8 pts at tiers 0-1 / 2 / 3."""
     room = sum(sum(len(units[i]) + 1 for i in greedy) for units, _pre, greedy, _v in parts.values())
+    # GACC: with `side` (the compaction's text outside the greedy lines), coverage counts tokens visible inside longer
+    # ones, in the pieces and in `side`.
+    sets = {key: contained(units, list(values)) if side is not None else [toks(u) for u in units]
+            for key, (units, _pre, _g, values) in parts.items()}
+    if side is not None:
+        covered |= {t for _u, _p, _g, values in parts.values() for t in values if _aligned(side, t)}
     cands = [
-        ((key, i), units[i], toks(units[i]), values)
+        ((key, i), units[i], sets[key][i], values)
         for key, (units, pre, _greedy, values) in parts.items()
         for i in range(len(units))
         if i not in pre

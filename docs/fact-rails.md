@@ -188,3 +188,23 @@ second round kept that benchmark as a report and guarded with the experimenter-s
 80 fresh sessions (78 with compactions); 95% CIs clustered by session; stub size 0.998–1.000 of v0.8. The first round
 on another 80 sessions gave +2.8 / +5.0 / +9.8 at tiers 0–1 / 2 / 3. Cost: one more greedy pass per compaction, up to
 +4.6 s on the largest sessions tried (1.6–6.1M chars).
+
+## Tokens visible inside longer ones (v0.10.0)
+
+The pooled greedy now counts a token as covered wherever a reader can see it as a word: inside a longer token with no
+letter or digit touching it (a short hash inside a path, an id inside a URL, a date inside a timestamp), in a piece or
+anywhere in the stub text outside the greedy lines (`value_select.contained`). Before, it bought such a token again in
+another piece. `JEV_COMPACTION_CONTAIN=0` restores the v0.9 coverage.
+
+Preregistered on the last 50 fresh Hermes sessions, against v0.9, tokens counted as kept only where they stand as a
+word:
+
+| rail tier | tokens used after compaction | fresh-set facts | error lines |
+|---|---|---|---|
+| 0–1 | +0.75 (+0.48 … +1.04) | +1.16 (+0.83 … +1.47) | 0.00 |
+| 2 | +1.23 (+0.70 … +1.77) | +2.15 (+1.71 … +2.53) | 0.00 (−0.08 … +0.08) |
+| 3 | +1.72 (+1.32 … +2.17) | +2.39 (+1.96 … +2.77) | −0.07 (−0.19 … +0.03) |
+
+Stub size 0.9995–1.0000 of v0.9; compaction time −0.16 … +0.09 s on the five largest sessions (1.4–6.1M chars). The
+same check on four earlier, already used sets gave +0.4 … +2.4. A token kept only inside a longer one is now shown
+once; the result's own stub keeps 1.6–2.9 pts fewer of its own tokens, because they are readable elsewhere.

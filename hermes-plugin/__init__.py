@@ -1048,7 +1048,7 @@ class JevEngine(EngineSettings):
     @staticmethod
     def _pool(base: list[dict[str, Any]], ctxs: dict[str, dict]) -> None:
         """Refill the greedy fact lines of every stub in `base` from one budget; the next _apply_tier uses them."""
-        parts, covered = {}, set()
+        parts, side = {}, []
         for msg in base:
             if msg.get("role") != "tool":
                 continue
@@ -1056,13 +1056,15 @@ class JevEngine(EngineSettings):
             ctx = ctxs.get(msg.get("tool_call_id"))
             key = ctx.get("key") if ctx else None
             if key is None:  # kept whole, a re-run note, or no value context: all of it stays
-                covered |= toks(stub)
+                side.append(stub)
                 continue
             units, _pre, greedy, _values = ctx["parts"][key]
             kept = {units[i] for i in greedy}
-            covered |= toks("\n".join(ln for ln in stub.split("\n") if ln not in kept))
+            side.append("\n".join(ln for ln in stub.split("\n") if ln not in kept))
             parts[msg["tool_call_id"]] = ctx["parts"][key]
-        for tc_id, lines in pool_lines(parts, covered).items():
+        covered = set().union(*map(toks, side))
+        contain = os.environ.get("JEV_COMPACTION_CONTAIN", "1") != "0"  # GACC; 0 = the GA of v0.9.0
+        for tc_id, lines in pool_lines(parts, covered, "\n".join(side) if contain else None).items():
             ctxs[tc_id]["lines"][ctxs[tc_id]["key"]] = lines
 
     def _last_resort(

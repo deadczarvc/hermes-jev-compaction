@@ -555,3 +555,14 @@ def test_pooled_budget_keeps_size_and_the_valued_lines(monkeypatch):
     pooled = stubs()
     assert sum(map(len, pooled.values())) <= sum(map(len, own.values())) + 6  # same fact chars; notes may differ
     assert "build/out_cafe.tar" in pooled["c0"] and "permission denied" in pooled["c0"]
+
+
+def test_containment_counts_tokens_seen_inside_longer_ones():
+    vs = engine.value_select if hasattr(engine, "value_select") else sys.modules["jev_context_engine.value_select"]
+    sets = vs.contained(["log at /srv/abc1234f/run.log", "abc1234fz other"], ["abc1234f"])
+    assert "abc1234f" in sets[0] and "abc1234f" not in sets[1]  # a letter touching it hides it
+    units = ["id abc1234f ok", "plain note 42 here"]
+    parts = {"k": (units, [], [0], {"abc1234f": 0.9, "42": 0.1})}
+    side = "earlier stub keeps /srv/abc1234f/run.log"
+    assert vs.pool_lines(dict(parts), set(), None)["k"] == ["id abc1234f ok"]  # GA buys it again
+    assert vs.pool_lines(dict(parts), set(), side)["k"] == []  # GACC: already readable in the side text
