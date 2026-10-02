@@ -41,4 +41,5 @@ beyond 10 calls per request and is worth documenting as a recipe.
 - Fork with the port: https://github.com/deadczarvc/hermes-jev-compaction
 - Notes for Hermes users: `HERMES.md` in the fork
 
-Happy to upstream anything useful — the adapter is MIT like the rest.
+Upstream has had no commits since 2026-09-18 and is not maintained, so fixes land in the forks: this repository for
+Hermes and https://github.com/deadczarvc-labs/jev-factkeep-compaction for Claude Code. The adapter is MIT like the rest.
