@@ -37,14 +37,34 @@ export function estimateTokens(text: string): number {
   return Math.ceil(tokens);
 }
 
+/** String.slice on UTF-16 indices, with boundaries inside a pair moved inward. */
+export function safeSlice(text: string, start: number, end?: number): string {
+  const index = (offset: number): number => {
+    const integer = Math.trunc(offset) || 0;
+    return integer < 0 ? Math.max(text.length + integer, 0) : Math.min(integer, text.length);
+  };
+  const splitsPair = (at: number): boolean => {
+    const before = text.charCodeAt(at - 1);
+    const after = text.charCodeAt(at);
+    return before >= 0xd800 && before <= 0xdbff && after >= 0xdc00 && after <= 0xdfff;
+  };
+  let from = index(start);
+  let to = end === undefined ? text.length : index(end);
+  if (splitsPair(from)) from++;
+  if (splitsPair(to)) to--;
+  return text.slice(from, to);
+}
+
 export function truncate(text: string, limit: number): string {
-  return text.length <= limit ? text : `${text.slice(0, Math.max(0, limit - 1))}…`;
+  return text.length <= limit ? text : `${safeSlice(text, 0, Math.max(0, limit - 1))}…`;
 }
 
 function abridge(text: string, head: number, tail: number): string {
   if (text.length <= head + tail + 40) return text;
-  const omitted = text.length - head - tail;
-  return `${text.slice(0, head)}\n[… ${omitted} chars omitted …]\n${text.slice(-tail)}`;
+  const keptHead = safeSlice(text, 0, head);
+  const keptTail = safeSlice(text, -tail);
+  const omitted = text.length - keptHead.length - keptTail.length;
+  return `${keptHead}\n[… ${omitted} chars omitted …]\n${keptTail}`;
 }
 
 export function isPinned(

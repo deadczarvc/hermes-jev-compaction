@@ -81,8 +81,8 @@ const compacted = toHermes(result.messages, transcript);
 
 ```bash
 npm run build                 # тесты CLI запускают dist/
-npx vitest run                # 41/41 (библиотека, адаптер, CLI)
-PYTHONPATH=<путь-к-hermes-agent> python -m pytest tests/   # 99/99 (плагин; импортирует agent.context_engine)
+npx vitest run                # 434/434 в 15 файлах (библиотека, адаптер, CLI)
+PYTHONPATH=<путь-к-hermes-agent> python -m pytest tests/   # 132/132 (плагин; импортирует agent.context_engine)
 ```
 
-Счётчики — версии v0.10.0.
+Счётчики — версии v0.90.0.

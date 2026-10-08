@@ -31,7 +31,10 @@ Requires Node >= 18 for the CLI and the library; the plugin needs only the Herme
 
 Optional settings under `context.jev`: `model` (default `jev-1.13.0`), `keep_threshold` (0.5), `max_state_tokens`
 (25000), `max_request_tokens` (30000), `egress_mode` (`metadata` by default: no result text leaves the process;
-also `redacted_text`, `full_text`, `off` — unknown values send nothing).
+also `redacted_text`, `full_text`, `off` — unknown values send nothing), `base_url` (unset by default: TypeSafe
+direct, `https://api.typesafe.ai/v1/systemone`). `base_url` redirects the decision endpoint — e.g. the local
+jev bridge `http://127.0.0.1:9178/v1/systemone` puts the jev-net decider chain (providers chain → luna) in front
+of the plugin. Plain http is accepted only on loopback addresses; credentials-in-URL are always rejected.
 
 Switches, all on by default (`=0` turns one off):
 
@@ -80,8 +83,8 @@ content-part array; tool calls may be nested (`function: {name, arguments}`) or 
 
 ```bash
 npm run build                 # the CLI tests run dist/
-npx vitest run                # 41/41 (library, adapter, CLI)
-PYTHONPATH=<path-to-hermes-agent> python -m pytest tests/   # 99/99 (plugin; imports agent.context_engine)
+npx vitest run                # 434/434 across 15 files (library, adapter, CLI)
+PYTHONPATH=<path-to-hermes-agent> python -m pytest tests/   # 132/132 (plugin; imports agent.context_engine)
 ```
 
-Counts are those of v0.10.0.
+Counts are those of v0.90.0.

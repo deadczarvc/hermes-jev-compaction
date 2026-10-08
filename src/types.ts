@@ -60,7 +60,44 @@ export interface CallDecision extends CallAnswer {
   id: string;
   tool: string;
   action: CallAction;
-  reason: 'pinned' | 'kept' | 'result_dropped' | 'call_dropped';
+  reason: 'pinned' | 'kept' | 'result_dropped' | 'call_dropped' | 'unscored';
+}
+
+export type JevTerminalCode = 'none' | 'network' | 'http_4xx' | 'http_5xx' | 'rate_limited' | 'deadline' | 'contract' | 'unknown';
+
+/** Round-local counts; cached, pinned, reduced and state-budget floor calls are excluded. */
+export interface JevRoundCounts {
+  attempts: number;
+  retries: number;
+  parsed: number;
+  scoredCalls: number;
+  unscoredCalls: number;
+}
+
+export interface JevRoundStats extends JevRoundCounts {
+  completion: 'complete' | 'partial';
+  terminalCode: JevTerminalCode;
+}
+
+/** Metadata-only observation of the existing round; never selects facts or changes request budgets. */
+export interface RoundObservation {
+  completion: 'complete' | 'partial' | 'failed';
+  terminal_code: JevTerminalCode;
+  requests_planned: number | null;
+  attempts: number;
+  retries: number;
+  parsed: number;
+  scored_calls: number;
+  unscored_calls: number;
+  fresh: number;
+  cache: number;
+  floor: number;
+  reduced: number;
+  pinned: number;
+  request_estimated_max: number | null;
+  actual_input_tokens: number | null;
+  actual_output_tokens: number | null;
+  usage_responses: number;
 }
 
 export interface HistoryToolCall {
@@ -103,8 +140,37 @@ export interface CompactOptions {
   maxStateTokens?: number;
   /** Estimated token ceiling for state plus one batch of questions. Default 30000. */
   maxRequestTokens?: number;
+  /** Deadline for the entire Jev round, including all batches and response bodies. Default 120000 ms. */
+  compactionTimeoutMs?: number;
+  /** Cancelable host timer; the hook supplies $.clock.sleep, the library uses a native timer. */
+  deadlineSleep?: (ms: number, options: { signal: AbortSignal }) => Promise<void>;
+  /** Total attempts per logical batch, including the first. Integer 1..4; default 3. */
+  maxJevAttempts?: number;
+  /** Worker slots, including retry pauses. Integer 1..8; default 4. */
+  maxConcurrentJevRequests?: number;
+  /** Retain unresolved original pairs, or reject the entire fresh round. Default retain-unscored. */
+  partialAnswers?: 'retain-unscored' | 'rollback';
+  /** Cancelable backoff, separate from the round deadline timer. Defaults to a native timer. */
+  retrySleep?: (ms: number, options: { signal: AbortSignal }) => Promise<void>;
+  /** Clock for absolute round guards; the hook supplies $.clock.now. Defaults to Date.now. */
+  nowMs?: () => Promise<number>;
   /** Characters of a dropped tool result to retain. Default 300. */
   truncateHeadChars?: number;
+  /**
+   * Jev's answers from an earlier compaction of the same session, by `tool_use_id`. Calls found here are not asked
+   * again (re-asking gave the same action on 711/711 calls). `compact` adds the new answers to a mutable map.
+   */
+  knownAnswers?: Map<string, CallAnswer>;
+  /**
+   * The char reduction the rails must reach (default 0.3). The hook passes what the context window needs (see
+   * `pressure` in hooks/fast-jev.ts), so a compaction gives up no more facts than the window requires.
+   */
+  minReduction?: number;
+  /**
+   * Values masked exactly wherever they appear in what is sent to Jev, on top of the secret families (the hook passes
+   * its own API key). Masking runs before the history is cut to fit, so a value split by a cut is masked too.
+   */
+  secrets?: readonly string[];
 }
 
 export interface ResolvedCompactOptions {
@@ -113,6 +179,12 @@ export interface ResolvedCompactOptions {
   preserveRecentMessages: number;
   maxStateTokens: number;
   maxRequestTokens: number;
+  compactionTimeoutMs: number;
+  maxJevAttempts: number;
+  maxConcurrentJevRequests: number;
+  partialAnswers: 'retain-unscored' | 'rollback';
+  retrySleep: NonNullable<CompactOptions['retrySleep']>;
+  nowMs: NonNullable<CompactOptions['nowMs']>;
   truncateHeadChars: number;
 }
 
@@ -134,7 +206,11 @@ export interface CompactResult {
     /** Which fitting stage the state needed, '' when no request was made. */
     stateStage: string;
     requests: number;
+    /** Present only for a planned Jev round. Actual sends and accepted complete pairs, not host application. */
+    jev?: Readonly<JevRoundStats>;
     ms: number;
+    /** Rail tier used (0 = strictest); a higher tier gave up rails to clear the reduction floor. */
+    railTier?: number;
   };
 }
 
@@ -198,5 +274,5 @@ export interface JevResponse {
 
 /** Anything that can answer Jev questions: `JevClient`, or a host-provided adapter. */
 export interface JevAsker {
-  ask(state: JevState, questions: JevQuestions): Promise<JevResponse>;
+  ask(state: JevState, questions: JevQuestions, signal?: AbortSignal): Promise<JevResponse>;
 }

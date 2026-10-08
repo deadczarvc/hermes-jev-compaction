@@ -8,7 +8,11 @@ Deploy: copy this directory to ~/.hermes/plugins/jev-context-engine/ and set
 ``context.engine: jev`` in config.yaml. Requires TYPESAFE_API_KEY in the
 environment (the Hermes .env is loaded into os.environ at startup).
 Config (optional, under ``context.jev``): model, keep_threshold,
-max_state_tokens, max_request_tokens.
+max_state_tokens, max_request_tokens, base_url. ``base_url`` redirects the
+decision endpoint — the local jev bridge (``http://127.0.0.1:9178/v1/systemone``)
+sits in front of the jev-net decider chain; unset (default) stays TypeSafe
+direct (https://api.typesafe.ai/v1/systemone). http is accepted only on
+loopback; userinfo is never allowed.
 
 Note: editing ``compression.*`` keys in config.yaml while a session is live
 may not propagate to the running engine; the values are picked up by the
@@ -24,6 +28,8 @@ import math
 import os
 import re
 import time
+import urllib.error
+import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -36,6 +42,66 @@ from .settings import SYSTEM_ONE_URL as SYSTEM_ONE_URL
 from .settings import EngineSettings
 from .value_select import message_contexts, pool_lines, token_values, toks, value_parts
 
+# Fork F1/F2 constants (src/compact.ts DEFAULT_OPTIONS + jevRetryDelay, src/request.ts):
+# up to 3 attempts per batch, one shared round deadline, capped exponential backoff.
+JEV_MAX_ATTEMPTS = 3
+JEV_ROUND_TIMEOUT_S = 120.0
+JEV_RETRY_MAX_DELAY_S = 30.0
+REQUEST_TIMEOUT_S = 60.0
+
+
+class JevContractError(ValueError):
+    """The Jev response violates the answer contract (fork request.ts JevContractError).
+
+    `kind` names the violation: ``json`` (body is not JSON — retryable), ``envelope``
+    (no `answers` object), ``answer`` (a present answer is invalid), ``no_complete_pair``
+    (nothing in the batch scored). `name` carries the offending key when known.
+    """
+
+    def __init__(self, kind: str, name: str = "") -> None:
+        super().__init__(f"Jev contract violation: {kind}" + (f" ({name})" if name else ""))
+        self.kind = kind
+        self.name = name
+
+
+class _JevRetryable(Exception):
+    """Internal: a transport-level failure worth another attempt (429/5xx/network/json)."""
+
+    def __init__(self, retry_after: float = 0.0) -> None:
+        super().__init__("retryable Jev failure")
+        self.retry_after = retry_after
+
+
+def _retry_after_from(exc: BaseException) -> float:
+    """Server hint in seconds from a urllib HTTPError's Retry-After header, else 0."""
+    headers = getattr(exc, "headers", None)
+    if headers is None:
+        return 0.0
+    try:
+        return max(0.0, float(headers.get("Retry-After") or 0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _retry_delay(attempt: int, retry_after: float = 0.0) -> float:
+    """Capped exponential backoff that honors the server hint (fork jevRetryDelay):
+    the exponent is capped at JEV_RETRY_MAX_DELAY_S, a Retry-After above the cap is
+    returned as-is and makes the caller give the job up instead of sleeping."""
+    return max(min(JEV_RETRY_MAX_DELAY_S, 1.0 * 2 ** (attempt - 1)), retry_after)
+
+
+def _validate_base_url(url: str) -> None:
+    """Port of checkBaseUrl (fork src/request.ts:8): https anywhere, plain http only on
+    explicit loopback, never userinfo — an API key must not ride an unintended hop."""
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme not in ("https", "http") or not parsed.hostname:
+        raise ValueError(f"unsupported base_url: {url.split(':', 1)[0]}")
+    if parsed.username or parsed.password or "@" in (parsed.netloc or ""):
+        raise ValueError("base_url must not embed credentials")
+    loopback = parsed.hostname.lower() in ("127.0.0.1", "localhost", "::1")
+    if parsed.scheme == "http" and not loopback:
+        raise ValueError("insecure base_url allowed only on loopback")
+
 STATE_CONTEXT = (
     "A coding agent conversation is being compacted to free context. `history` is the whole "
     "conversation so far, oldest first; tool outputs are replaced by a short `result` note and "
@@ -46,7 +112,6 @@ STATE_CONTEXT = (
 INPUT_CHARS = [1000, 200, 60]
 TEXT_HEAD, TEXT_TAIL = 400, 150
 REQUEST_OVERHEAD_TOKENS = 20
-_ALLOWED_SCHEMES = ("https://", "http://")
 _TOKEN_PIECES = re.compile(r"[A-Za-z]+|\d+|[^\sA-Za-z\d]")
 _IDENTIFIER_RE = re.compile(
     r"([A-Za-z]:[\\/]|/(?:home|Users|var|tmp|etc)/)"
@@ -482,12 +547,40 @@ def brief_args(value: Any, limit: int) -> Any:
 def _http_post_json(
     url: str, body: bytes, headers: dict[str, str], timeout: float
 ) -> dict[str, Any]:
-    """POST JSON to an http(s) URL only; anything else is refused before any I/O."""
-    if not url.startswith(_ALLOWED_SCHEMES):
-        raise ValueError(f"unsupported base_url scheme: {url.split(':', 1)[0]}")
+    """POST JSON to a validated http(s) URL; anything else is refused before any I/O.
+
+    Transport failures keep their taxonomy for the retry loop (F1/F2): a non-2xx
+    status becomes ``_JevRetryable`` for 429/5xx (with Retry-After parsed) or a
+    ``JevContractError('http_<status>')``-shaped terminal for other statuses; a body
+    that is not JSON is ``JevContractError('json')`` (retryable); a response without
+    an ``answers`` object is ``JevContractError('envelope')`` (fatal, fork F2).
+    """
+    _validate_base_url(url)
     req = urllib.request.Request(url, data=body, headers=headers)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read())
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if not 200 <= getattr(resp, "status", 200) < 300:
+                raise _JevRetryable()  # pragma: no cover — urllib raises HTTPError first
+            raw = resp.read()
+    except urllib.error.HTTPError as err:
+        if err.code == 429 or 500 <= err.code <= 599:
+            raise _JevRetryable(_retry_after_from(err)) from None
+        raise JevContractError(f"http_{err.code}") from None
+    except urllib.error.URLError as err:
+        reason = err.reason
+        retryable = isinstance(reason, (TimeoutError, ConnectionError, OSError)) or (
+            isinstance(reason, str) and "timed out" in reason.lower()
+        )
+        if retryable:
+            raise _JevRetryable() from None
+        raise ValueError(f"Jev endpoint unreachable: {reason}") from None
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        raise JevContractError("json") from None
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("answers"), dict):
+        raise JevContractError("envelope")
+    return parsed
 
 
 class JevEngine(EngineSettings):
@@ -588,7 +681,30 @@ class JevEngine(EngineSettings):
         stats["min_reduction"] = round(floor, 3)
         try:
             state, state_tokens = self._fit_state(messages, calls)
-            answers = self._ask_all(state, state_tokens, candidates)
+            pairs = self._ask_all(state, state_tokens, candidates)
+            # Fork F3 (compact.ts 'unscored'): a batch whose answers never arrived (round
+            # deadline) leaves its calls unscored — the pair is KEPT as-is (reason
+            # unscored); whole-round rollback falls into the deterministic fallback,
+            # exactly where a contract-failed round lands in the fork.
+            by_id: dict[str, str] = {}
+            unscored = 0
+            for c, pair in zip(candidates, pairs, strict=False):
+                if pair is None:
+                    unscored += 1
+                    if self.partial_answers == "rollback":
+                        raise ValueError("Jev partial answers with partial_answers=rollback")
+                    continue  # retain-unscored: keep the pair verbatim
+                d = self._decide(pair)
+                # Research guard: failure history survives. An error result may lose verbatim bulk
+                # (drop_result) but its call + bounded head must stay — retrying failed approaches
+                # is the most expensive post-compaction bug class.
+                if d == "drop_call" and c.get("is_error"):
+                    d = "drop_result"
+                by_id[c["id"]] = d
+            if unscored == len(candidates):
+                # fork runRoundJobs: scoredCalls === 0 → the round failed; plugin contract:
+                # a failed round degrades to the deterministic fallback, never silent keep-all
+                raise ValueError("Jev round scored no calls")
         except Exception:  # noqa: BLE001 — Jev down: deterministic fallback, never a lossy summary
             stats["mode"] = "fallback"
             stats["error"] = "egress or Jev failure"
@@ -597,15 +713,7 @@ class JevEngine(EngineSettings):
             return self._offload(
                 messages, self._fallback_prune(messages, calls, floor, hard)
             )  # user decision 2026-09-30: wire it, not fail open
-        by_id = {}
-        for c, a in zip(candidates, answers, strict=False):
-            d = self._decide(a)
-            # Research guard: failure history survives. An error result may lose verbatim bulk
-            # (drop_result) but its call + bounded head must stay — retrying failed approaches
-            # is the most expensive post-compaction bug class.
-            if d == "drop_call" and c.get("is_error"):
-                d = "drop_result"
-            by_id[c["id"]] = d
+        stats["unscored"] = unscored
         out = self._offload(messages, self._apply(messages, calls, by_id, floor, hard))
         dropped_calls = [c for c in calls if by_id.get(c["id"]) == "drop_call"]
         self._dropped_receipts = getattr(self, "_dropped_receipts", [])[-100:]
@@ -841,12 +949,24 @@ class JevEngine(EngineSettings):
         if current:
             batches.append(current)
 
+        # Fork F2 (runRoundJobs): ONE shared deadline for the whole round — every batch
+        # must finish (retries included) inside compaction_timeout_s from now, so N
+        # batches can no longer multiply the per-request timeout unboundedly.
+        self._round_deadline = time.monotonic() + self.compaction_timeout_s
+
         # ponytail: parallel batches (upstream parity), max 4 workers — TypeSafe rate limits
         def ask_one(batch: list[dict[str, Any]]) -> list[dict[str, Any]]:
             questions: dict[str, Any] = {}
             for call in batch:
                 questions.update(self._questions(call))
-            return self._ask_jev(state, questions, batch)
+            try:
+                return self._ask_jev(state, questions, batch)
+            except JevContractError:
+                raise  # contract violation fails the whole round (fork TERMINAL 'contract')
+            except Exception:  # this batch is unscored, the round goes on
+                if self.partial_answers == "rollback":
+                    raise
+                return [None] * len(batch)  # fork F3: endJob(deadline/terminal) → unscored
 
         answers: list[dict[str, Any]] = []
         if len(batches) > 1:
@@ -857,16 +977,65 @@ class JevEngine(EngineSettings):
             answers = ask_one(batches[0]) if batches else []
         return answers
 
+    # -- Jev round internals (fork F1/F2/F3) ---------------------------------
+
+    def _answer_pairs(
+        self, parsed: dict[str, Any], batch: list[dict[str, Any]]
+    ) -> tuple[list[dict[str, Any] | None], list[str]]:
+        """Port of readBatchAnswers (fork request.ts): each call needs both its
+        ``call_<id>`` and ``result_<id>`` noul values. A present-but-invalid answer is
+        fatal (JevContractError('answer')); a MISSING half is not — the call comes back
+        unscored (None) unless every policy is rollback, where the caller decides."""
+        answers = parsed["answers"]
+        out: list[dict[str, Any] | None] = []
+        missing: list[str] = []
+
+        def noul(name: str) -> float:
+            if name not in answers:
+                raise KeyError(name)
+            a = answers[name]
+            v = a.get("noul") if isinstance(a, dict) else None
+            if (
+                not isinstance(v, (int, float))
+                or isinstance(v, bool)
+                or not math.isfinite(v)
+                or not 0.0 <= v <= 1.0
+            ):
+                raise JevContractError("answer", name)
+            return float(v)
+
+        for call in batch:
+            try:
+                out.append(
+                    {
+                        "keepCall": noul(f"call_{call['id']}"),
+                        "keepResult": noul(f"result_{call['id']}"),
+                    }
+                )
+            except KeyError:
+                out.append(None)
+                missing.append(call["id"])
+        if batch and not any(a is not None for a in out):
+            raise JevContractError("no_complete_pair")
+        return out, missing
+
     def _ask_jev(
         self,
         state: dict[str, Any],
         questions: dict[str, Any],
         batch: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
+        """One batch through the retry loop (fork F1, askJobWithRetry): 429/5xx/network
+        and a JSON parse failure are retried with capped backoff (server Retry-After
+        honored); contract envelope/answer violations are terminal at once; batches left
+        unscored by the shared round deadline come back as None (F3) unless rollback."""
         key = self.api_key.strip() if isinstance(self.api_key, str) else ""
         if not key:
             key = self._resolve_key()
         self.api_key = key
+        # Direct callers (no _ask_all round) get their own deadline, not an AttributeError.
+        if not getattr(self, "_round_deadline", 0):
+            self._round_deadline = time.monotonic() + self.compaction_timeout_s
         payload: dict[str, Any] = {
             "model": self.model,
             "state": state,
@@ -874,35 +1043,54 @@ class JevEngine(EngineSettings):
         }
         if self.egress_mode == "redacted_text":
             payload = redact_export_value(payload)
+        # Fork F4 (messages.ts:23 / buildJevRequest): the credential itself is a known
+        # secret value — masked anywhere the payload carries text that could quote it
+        # (metadata mode ships no values, so there is nothing to mask).
+        if key and self.egress_mode in ("redacted_text", "full_text"):
+            dumped = json.dumps(payload, ensure_ascii=False)
+            if key in dumped:
+                payload = json.loads(dumped.replace(key, "[REDACTED:known]"))
         body = json.dumps(payload).encode()
-        parsed = _http_post_json(
-            self.base_url,
-            body,
-            {"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-            60.0,
-        )
-        answers = parsed.get("answers") or {}
-        out: list[dict[str, Any]] = []
-        for call in batch:
-
-            def noul(key: str = "") -> float:
-                a = answers.get(key) or {}
-                v = a.get("noul")
-                if (
-                    not isinstance(v, (int, float))
-                    or not math.isfinite(v)
-                    or not 0.0 <= v <= 1.0
-                ):
-                    raise ValueError(f"invalid Jev answer for {key}")
-                return float(v)
-
-            out.append(
-                {
-                    "keepCall": noul(f"call_{call['id']}"),
-                    "keepResult": noul(f"result_{call['id']}"),
-                }
+        last_error: Exception | None = None
+        for attempt in range(1, JEV_MAX_ATTEMPTS + 1):
+            remaining = self._round_deadline - time.monotonic()
+            if remaining <= 0:
+                return [None] * len(batch)  # shared round deadline: batch unscored (F3)
+            try:
+                parsed = _http_post_json(
+                    self.base_url,
+                    body,
+                    {"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                    min(REQUEST_TIMEOUT_S, remaining),
+                )
+            except JevContractError:
+                raise  # envelope / answer / http_4xx: terminal, never retried
+            except urllib.error.HTTPError as err:
+                # Raw HTTPError reaching this layer keeps the same taxonomy as the
+                # transport wrapper: 429/5xx retry with the server's hint, else terminal.
+                if err.code == 429 or 500 <= err.code <= 599:
+                    last_error = _JevRetryable(_retry_after_from(err))
+                else:
+                    raise JevContractError(f"http_{err.code}") from None
+            except _JevRetryable as err:
+                last_error = err
+            except (TimeoutError, ConnectionError, OSError) as err:
+                last_error = err
+            else:
+                pairs, _missing = self._answer_pairs(parsed, batch)
+                return pairs
+            if attempt == JEV_MAX_ATTEMPTS:
+                return [None] * len(batch)  # retries exhausted: batch unscored (F3)
+            delay = _retry_delay(
+                attempt,
+                getattr(last_error, "retry_after", 0.0) if last_error else 0.0,
             )
-        return out
+            if delay > JEV_RETRY_MAX_DELAY_S:
+                return [None] * len(batch)  # fork: delay > cap → end the job
+            if self._round_deadline - time.monotonic() <= delay:
+                return [None] * len(batch)  # a sleep now can only end past the deadline
+            time.sleep(delay)
+        return [None] * len(batch)  # unreachable; typed exit for the loop
 
     @staticmethod
     def _resolve_key() -> str:
@@ -1368,6 +1556,14 @@ def register(ctx: Any) -> None:
         engine.max_request_tokens = int(
             jev_cfg.get("max_request_tokens", engine.max_request_tokens)
         )
+        engine.base_url = jev_cfg.get("base_url", engine.base_url)
+        engine.compaction_timeout_s = engine._coerce_number(
+            jev_cfg.get("compaction_timeout_s"), engine.compaction_timeout_s, float
+        )
+        policy = str(jev_cfg.get("partial_answers") or engine.partial_answers)
+        if policy not in ("retain-unscored", "rollback"):
+            policy = engine.partial_answers
+        engine.partial_answers = policy
     except Exception:  # defaults survive any config problem
         logging.getLogger(__name__).debug(
             "jev-context-engine: config not read, defaults kept", exc_info=True

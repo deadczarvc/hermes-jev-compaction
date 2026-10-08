@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 import json
 import time
+from collections.abc import Callable
 from typing import Any, Self, cast
 
 from agent.context_engine import ContextEngine
@@ -24,6 +25,7 @@ _POLICY_FIELDS = (
     "max_tokens", "egress_mode", "model_thresholds", "threshold_percent",
     "threshold_tokens_cap", "protect_first_n", "protect_last_n", "tail_mode",
     "emit_automatic_compaction_status",
+    "compaction_timeout_s", "partial_answers",
     "_config_threshold_percent", "_configured_threshold_percent", "_config_context_length",
 )
 
@@ -40,6 +42,10 @@ class EngineSettings(ContextEngine):
         self.max_request_tokens = 30_000
         self.max_tokens: int | None = None
         self.egress_mode = "metadata"
+        # Fork F2/F3 knobs (compact.ts DEFAULT_OPTIONS): one deadline per compaction
+        # round and the partial-answers policy ("retain-unscored" | "rollback").
+        self.compaction_timeout_s = 120.0
+        self.partial_answers = "retain-unscored"
         self.model_thresholds: dict[str, float] = {}
         self.threshold_tokens_cap: int | None = None
         self.tail_mode = "ratio"
@@ -129,6 +135,24 @@ class EngineSettings(ContextEngine):
         except (TypeError, ValueError):
             return None
         return ivalue if ivalue > 0 else None
+
+    @staticmethod
+    def _coerce_text(value: object, fallback: str) -> str:
+        """Host config string option: a present-but-empty value selects the DEFAULT
+        (fork F10), never a blank that would break the request or fail egress."""
+        text = value.strip() if isinstance(value, str) else ""
+        return text or fallback
+
+    @staticmethod
+    def _coerce_number(value: object, fallback: float, caster: Callable[[float], Any] = float) -> Any:
+        """Host config numeric option: empty or invalid selects the default, and one bad
+        value must not cascade into the remaining option fields."""
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return fallback
+        try:
+            return caster(float(value))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return fallback
 
     def update_model(
         self, model: str, context_length: int, base_url: str = "", api_key: str = "",

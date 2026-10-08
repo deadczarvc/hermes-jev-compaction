@@ -97,7 +97,9 @@ describe('lossless Hermes projection', () => {
     expect(restored[1]).toEqual(source[1]);
     expect(restored[2]).toMatchObject({ role: 'tool', tool_call_id: 'safe-id', error: true, result_meta: { preserve: true } });
     expect(restored[2]!.content).not.toEqual(source[2]!.content);
-    expect(restored[2]!.content).toContain('[fast-jev-compaction truncated');
+    // Engine v0.3.0-astra.29 replaces a dropped error result with a fact-rails stub
+    // (ERROR_KEEP_CHARS policy) instead of the legacy "[fast-jev-compaction truncated]" marker.
+    expect(restored[2]!.content).toContain('[fast-jev-compaction omitted');
   });
 
   it('refuses to mutate missing or duplicate native IDs', async () => {

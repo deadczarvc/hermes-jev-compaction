@@ -79,8 +79,8 @@ const compacted = toHermes(result.messages, transcript);
 
 ```bash
 npm run build                 # CLI 测试运行 dist/
-npx vitest run                # 41/41（库、适配层、CLI）
-PYTHONPATH=<hermes-agent 路径> python -m pytest tests/   # 99/99（插件；导入 agent.context_engine）
+npx vitest run                # 434/434（15 个文件：库、适配层、CLI）
+PYTHONPATH=<hermes-agent 路径> python -m pytest tests/   # 132/132（插件；导入 agent.context_engine）
 ```
 
-计数对应 v0.10.0。
+计数对应 v0.90.0。

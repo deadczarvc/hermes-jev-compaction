@@ -11,7 +11,7 @@
 // jev-1.13.0); pin explicitly with --model jev-1.13.0.
 
 import { readFileSync, writeFileSync } from 'node:fs';
-import { collectToolCalls, compactMessages, resolveOptions } from '../dist/index.js';
+import { collectToolCalls, compactMessages, resolveJevEndpoint, resolveOptions, selectJevApiKey } from '../dist/index.js';
 import { fromHermes, hermesGoal, toHermes } from '../dist/hermes.js';
 
 function usage(code) {
@@ -29,18 +29,21 @@ function usage(code) {
     '  --preserve-recent <n>     newest messages never touched (default 6)',
     '  --max-state-tokens <n>    state token ceiling (default 25000)',
     '  --max-request-tokens <n>  request token ceiling (default 30000)',
-    '  --truncate-head <n>       chars kept of a dropped result (default 300)',
+    '  --truncate-head <n>       chars kept of a dropped result (default 200)',
+    '  --provider <name>         typesafe | openrouter | vercel | luna | liquid | solar | custom (default typesafe)',
+    '  --allow-third-party       required for every non-typesafe provider before any key read or HTTP',
     '  --dry-run                 map and report only; no Jev requests, no key needed',
     '  -h, --help                this help',
     '',
-    'Env: TYPESAFE_API_KEY (required unless --dry-run).',
+    'Env: the selected provider\'s key namespace — TYPESAFE_API_KEY (default), OPENROUTER_API_KEY,',
+    'AI_GATEWAY_API_KEY, OPENAI_API_KEY (luna), LIQUID_API_KEY (liquid), UPSTAGE_API_KEY (solar).',
   ];
   console.error(lines.join('\n'));
   process.exit(code);
 }
 
 function parseArgs(argv) {
-  const opts = { model: 'jev-latest', out: null, goal: '', dryRun: false };
+  const opts = { model: null, provider: null, allowThirdParty: false, out: null, goal: '', dryRun: false };
   const positional = [];
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -62,6 +65,8 @@ function parseArgs(argv) {
     };
     switch (arg) {
       case '--model': opts.model = next(); break;
+      case '--provider': opts.provider = next(); break;
+      case '--allow-third-party': opts.allowThirdParty = true; break;
       case '--out': case '-o': opts.out = next(); break;
       case '--goal': opts.goal = next(); break;
       case '--keep-threshold': opts.keepThreshold = number(); break;
@@ -125,16 +130,31 @@ if (opts.dryRun) {
   process.exit(0);
 }
 
-const apiKey = process.env.TYPESAFE_API_KEY;
-if (!apiKey) {
-  console.error('TYPESAFE_API_KEY is not configured');
-  process.exit(2);
+// Provider/key policy lives in the library (resolveJevEndpoint/selectJevApiKey): the provider
+// flag only selects it. luna speaks the OpenAI Decisions wire (POST /v1/decisions); the rest
+// speak System One. The key comes from the selected provider's env namespace (never an argument).
+const providerOptions = {
+  ...(opts.provider === null ? {} : { provider: opts.provider }),
+  ...(opts.allowThirdParty ? { allowThirdPartyEgress: true } : {}),
+  ...(opts.model === null ? {} : { model: opts.model }),
+};
+
+if (!opts.dryRun) {
+  const probe = resolveJevEndpoint({ ...providerOptions });
+  const envKey = selectJevApiKey(probe, undefined, process.env);
+  if (!envKey) {
+    console.error(
+      probe.keyEnv === null
+        ? 'apiKey is required for custom provider'
+        : `${probe.keyEnv} is not configured`,
+    );
+    process.exit(2);
+  }
 }
 
 try {
   const result = await compactMessages(messages, {
-    apiKey,
-    model: opts.model,
+    ...providerOptions,
     goal,
     keepThreshold: opts.keepThreshold,
     preserveRecentMessages: opts.preserveRecentMessages,
