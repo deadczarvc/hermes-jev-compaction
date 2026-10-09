@@ -27,10 +27,18 @@ export function decisionsQuestions(questions: JevQuestions): DecisionsQuestion[]
     if (q.type === 'noul') {
       // Newlines, not an inline run-on: "…is about True when: …" read as one broken sentence and
       // gpt-6-luna answered the subject gate False 3/3; the separated form answers 0.89 (live probe).
-      const criteria = q.criteria && (q.criteria.true !== undefined || q.criteria.false !== undefined)
-        ? `\nTrue when: ${q.criteria.true ?? 'the condition holds'}.\nFalse when: ${q.criteria.false ?? 'it does not'}.`
+      // A statement with criteria still reads poorly; the explicit question form answers correctly
+      // (live matrix 2026-10-08: ru-tests 0.29->1.00, jevk5-fallback 0.72->0.99, build stays 0.95).
+      const c = q.criteria;
+      const hasCriteria = c !== undefined && (c.true !== undefined || c.false !== undefined);
+      const criteria = c && hasCriteria
+        ? `\nTrue when: ${c.true ?? 'the condition holds'}.\nFalse when: ${c.false ?? 'it does not'}.`
         : '';
-      return { type: 'predicate', name, instructions: q.instructions + criteria };
+      let instructions = q.instructions;
+      if (hasCriteria && !instructions.trimEnd().endsWith('?')) {
+        instructions = 'Is this statement true: ' + instructions.trim().replace(/[.:;\s]+$/, '') + '?';
+      }
+      return { type: 'predicate', name, instructions: instructions + criteria };
     }
     if (q.type === 'choice') {
       return {

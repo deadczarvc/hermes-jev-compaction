@@ -28,12 +28,14 @@ describe('decisions wire: the request', () => {
       n: { type: 'noul', instructions: 'keep?', criteria: { true: 'it matters', false: 'it does not' } },
       c: { type: 'choice', instructions: 'pick', criteria: { a: 'AA', b: null } },
       s: { type: 'score', instructions: 'rate', criteria: ['low', 'high'] },
+      w: { type: 'noul', instructions: 'The build passed', criteria: { true: 'ok', false: 'not' } },
     };
     const body = JSON.parse(buildDecisionsRequest({ apiKey: KEY, baseUrl: D }, S, questions).body);
     expect(body.questions).toEqual([
       { type: 'predicate', name: 'n', instructions: 'keep?\nTrue when: it matters.\nFalse when: it does not.' },
       { type: 'choice', name: 'c', instructions: 'pick', choices: [{ value: 'a', description: 'AA' }, { value: 'b', description: 'b' }] },
       { type: 'score', name: 's', instructions: 'rate', levels: [{ label: 'low' }, { label: 'high' }] },
+      { type: 'predicate', name: 'w', instructions: 'Is this statement true: The build passed?\nTrue when: ok.\nFalse when: not.' },
     ]);
   });
 

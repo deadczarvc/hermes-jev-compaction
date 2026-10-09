@@ -46,7 +46,7 @@ The same rules run in Claude Code:
 | `hermes-plugin/` | Hermes context engine plugin (`jev-context-engine`): Jev decisions and the fact rails inside a running session, fallback without HTTP, saved full outputs. |
 | `src/hermes.ts` | Bidirectional adapter: OpenAI-chat messages (`role/content/tool_calls` + `role:"tool"`) ↔ library `Message[]`. Handles nested and flat tool-call spellings, content-part arrays, grouped tool results. |
 | `bin/hermes-compact.mjs` | On-demand CLI: reads a transcript (JSON array / `{"messages":[...]}` / JSONL), runs Jev, writes the compacted transcript + stats. `--dry-run` maps without any API call. |
-| `tests/` | TypeScript library, adapter and CLI tests + Python plugin tests. Green at v0.90.0: 434/434 vitest across 15 files, 132/132 pytest. |
+| `tests/` | TypeScript library, adapter and CLI tests + Python plugin tests. Green at v0.90.1: 439/439 vitest across 16 files, 132/132 pytest. |
 | `HERMES.md` | Integration details for Hermes users and agent-operated workflows. |
 
 Beyond the default TypeSafe System One endpoint, the decision endpoint is pluggable by provider
