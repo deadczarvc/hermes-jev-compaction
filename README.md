@@ -24,7 +24,7 @@ omitted, nothing rewritten) and answers two yes/no questions per tool call —
 should the call stay, and should its result stay verbatim. Text is never
 rewritten; only tool calls and results are deleted or truncated.
 
-## Fact rails (v0.5.0, refined in v0.6.0, v0.7.0, v0.8.0, v0.9.0 and v0.10.0)
+## Fact rails (v0.5.0 … v0.10.0; the factkeep engine is ported wholesale into this repo at v0.90.0)
 
 Nothing Jev drops is erased any more. A reproducible read longer than 3000 chars shrinks to a one-line note;
 any other result keeps its head, its fact lines (errors, HTTP codes, paths, versions, ids, counts, receipts)
